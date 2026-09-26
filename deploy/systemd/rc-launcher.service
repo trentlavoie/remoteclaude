@@ -1,0 +1,59 @@
+# Template: install.sh fills in the repo and python paths and writes the result to
+# ~/.config/systemd/user/. Edit this file (then re-run install.sh), not the copy.
+#
+# The token-guarded web launcher. It holds no Claude session itself (they live under
+# rc-tmux.service), so restarting it is always safe, and it can be sandboxed without
+# touching them. Reached only through `tailscale serve` on the tailnet (docs/TAILSCALE.md).
+
+[Unit]
+Description=Remote Control launcher (token-guarded web UI on 127.0.0.1)
+Documentation=file://@REPO@/RUNBOOK.md file://@REPO@/docs/TAILSCALE.md
+# Its tmux server must be up first; stopping or restarting rc-tmux stops/restarts this too.
+Requires=rc-tmux.service
+After=rc-tmux.service
+
+[Service]
+Type=simple
+# Settings (0600, written by install.sh). Holds no secret: the token has its own 0600 file.
+EnvironmentFile=%h/.config/rc-launcher/rc-launcher.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=@REPO@
+# Two settings are pinned HERE, not in the env file, because EnvironmentFile= overrides
+# Environment= and neither may be changed by an edit to that file:
+#   RC_TMUX_BIN       the socket-pinned tmux client; plain `tmux` would reach (or start)
+#                     your personal server
+#   RC_LAUNCHER_BIND  loopback only; this host has a public IP and tailscale serve is the
+#                     only way in
+# python -E -s: ignore PYTHON* env vars and ~/.local site-packages (stdlib-only app);
+# -u: unbuffered, so every line reaches the journal as it is printed.
+ExecStart=/usr/bin/env RC_TMUX_BIN=@REPO@/deploy/rc-tmux RC_LAUNCHER_BIND=127.0.0.1 @PYTHON@ -E -s -u @REPO@/rc_launcher.py
+Restart=on-failure
+# back off 5s -> 5min between retries instead of giving up: a headless box has nobody to
+# `systemctl reset-failed` it, and the watchdog alerts while it is down
+RestartSec=5
+RestartSteps=5
+RestartMaxDelaySec=5min
+TimeoutStopSec=15
+# Files it creates (uploads, settings, roots) are owner-only.
+UMask=0077
+MemoryMax=1G
+TasksMax=256
+# Hardening that works in a --user unit WITHOUT user namespaces (seccomp/prctl only). On
+# Ubuntu 24.04 AppArmor blocks unprivileged user namespaces, which ProtectSystem=,
+# ProtectHome=, PrivateTmp=, ReadWritePaths= etc. need in a user unit, so those would make
+# the unit fail to start. They would buy little anyway: the launcher must write $HOME itself
+# (~/.claude.json is replaced via a temp file there) and the user cannot write /usr or /etc.
+# NOT MemoryDenyWriteExecute: the launcher runs `claude auth status` (a JIT runtime).
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+# HTTP server + tmux socket + claude's HTTPS; netlink for glibc's getaddrinfo
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target
