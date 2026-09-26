@@ -349,7 +349,11 @@ def _pid_stop(proj, close, event, cache) -> tuple[str, str | None]:
 def desk_stop(proj: str) -> tuple[str, str | None]:
     """✕ on a desk-badged row: close the project's auto-paired desk claude. Kept separate
     from stop() on purpose — reaping a desk claude (the user's own desktop session) stays an
-    explicit action, never something a plain /stop falls into."""
+    explicit action, never something a plain /stop falls into. RC_TAKEOVER=0 turns it off
+    entirely (a shared/headless host where a desk claude may be someone's live work): the
+    launcher then never signals a desk process, and says so instead of reporting "idle"."""
+    if not rc_desk.TAKEOVER:
+        return "failed", "closing desk sessions is disabled (RC_TAKEOVER=0)"
     return _pid_stop(proj, rc_desk.takeover, "stopdesk", rc_desk.desk_projects)
 
 
