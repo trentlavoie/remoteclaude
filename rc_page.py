@@ -1,9 +1,18 @@
 """The launcher page: the project list, the live dots, the search box and the launch/stop
-taps. Data only — rc_sessions.page() fills the __PLACEHOLDER__s per request."""
+taps. Data only — rc_sessions.page() fills the __PLACEHOLDER__s per request. The /files
+link is spliced in at import only when the share is enabled (RC_SHARE_ENABLED)."""
 
+import rc_config as cfg
 from rc_templates import shared
 
-PAGE = shared("""<!doctype html>
+_FILES_LINK = '<a class=fileslink href="/files">files</a>'
+
+
+def build(share: bool) -> str:
+    return shared(_TEMPLATE.replace("__FILESLINK__", _FILES_LINK if share else ""))
+
+
+_TEMPLATE = """<!doctype html>
 <html><head>
 <meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -91,7 +100,7 @@ text-align:center}
 </style></head>
 <body>
 <header>
-<div class=htop><h1>Remote Control &middot; __HOST__</h1><span class=hdr><a class=fileslink id=settingslink href="#">settings</a><a class=fileslink id=addroot href="#">+ root</a><a class=fileslink href="/files">files</a><span id=auth class=auth></span></span></div>
+<div class=htop><h1>Remote Control &middot; __HOST__</h1><span class=hdr><a class=fileslink id=settingslink href="#">settings</a><a class=fileslink id=addroot href="#">+ root</a>__FILESLINK__<span id=auth class=auth></span></span></div>
 <div id=settingsPanel class=setpanel style=display:none>
 <label><input type=checkbox id=tgFork> Fork the conversation on resume (branch, not continue)</label>
 <label><input type=checkbox id=tgWorktree> Isolate each session in its own git worktree</label>
@@ -299,4 +308,5 @@ authBar();render();setInterval(poll,5000);
 if(location.search)history.replaceState({},'',location.pathname);
 __PTR__
 </script>
-</body></html>""")
+</body></html>"""
+PAGE = build(cfg.SHARE_ENABLED)

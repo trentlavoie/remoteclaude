@@ -26,9 +26,10 @@ import rc_launcher
 import rc_page
 import rc_sessions
 import rc_settings
+import rc_share
 import rc_templates
 
-from tests._harness import TOKEN, ServerCase, env, keep, restore_globals
+from tests._harness import TOKEN, ServerCase, env, keep, restore_globals, share_dir
 
 _REAL_LOG = rc_config.log_event  # captured at import, before any setUp silences it
 SAME = {"Sec-Fetch-Site": "same-origin"}
@@ -307,13 +308,178 @@ class TemplateTest(unittest.TestCase):
         self.assertEqual(rc_templates.fill("__A__", {"__A__": "x"}).nonce, "")
 
     def test_page_escapes_names_in_markup_and_posts_its_actions(self):
-        page = rc_page.PAGE
+        page = rc_page.build(False)
         self.assertIn("esc(n)+'</span>'", page)
         self.assertIn("aria-label=\"close '+esc(n)+'\"", page)
         self.assertIn("'\"':'&quot;'", page)  # esc() covers attribute quotes too
         for route in ("/launch", "/stop", "/create", "/settings", "/addroot"):
             self.assertIn(f"post('{route}?", page)
             self.assertNotIn(f"fetch('{route}", page)
+
+    def test_files_link_follows_the_share_switch(self):
+        self.assertNotIn('href="/files"', rc_page.build(False))
+        self.assertIn('href="/files"', rc_page.build(True))
+        self.assertEqual(rc_page.PAGE, rc_page.build(rc_config.SHARE_ENABLED))
+
+
+class ShareOptInTest(WebCase):
+    def test_share_disabled_is_404_on_every_verb(self):
+        rc_config.SHARE_ENABLED = False
+        Path(self.share, "a.txt").write_text("x")
+        self.assertEqual(self.req("GET", "/files")[0], 404)
+        self.assertEqual(self.req("GET", "/files/a.txt")[0], 404)
+        self.assertEqual(self.req("HEAD", "/files/a.txt")[0], 404)
+        self.assertEqual(self.req("DELETE", "/files/a.txt")[0], 404)
+        status, hdrs, _ = self.req("PUT", "/files/b.txt", body=b"x")
+        self.assertEqual((status, hdrs.get("connection")), (404, "close"))
+        self.assertEqual(sorted(os.listdir(self.share)), ["a.txt"])
+
+
+class DownloadTest(WebCase):
+    def get(self, name, data=b"<script>alert(1)</script>"):
+        Path(self.share, name).write_bytes(data)
+        return self.req("GET", f"/files/{name}")
+
+    def test_active_types_are_sandboxed_attachments(self):
+        for name in ("x.html", "x.svg", "x.xhtml", "x.xml", "x.js", "noext"):
+            status, hdrs, body = self.get(name)
+            self.assertEqual(status, 200, name)
+            self.assertEqual(hdrs["content-type"], "application/octet-stream", name)
+            self.assertTrue(hdrs["content-disposition"].startswith("attachment;"), name)
+            self.assertIn("sandbox", hdrs["content-security-policy"], name)
+            self.assertEqual(body, b"<script>alert(1)</script>")
+
+    def test_passive_types_still_open_inline(self):
+        cases = {
+            "p.png": ("image/png", None),
+            "d.pdf": ("application/pdf", None),
+            "v.mp4": ("video/mp4", None),
+            "t.txt": ("text/plain", "sandbox"),
+            "j.json": ("application/json", "sandbox"),
+        }
+        for name, (ctype, csp) in cases.items():
+            _, hdrs, _ = self.get(name, b"data")
+            self.assertEqual(hdrs["content-type"], ctype, name)
+            self.assertTrue(hdrs["content-disposition"].startswith("inline;"), name)
+            self.assertEqual(hdrs["x-content-type-options"], "nosniff")
+            got = hdrs.get("content-security-policy")
+            self.assertTrue(csp in got if csp else got is None, (name, got))
+
+    def test_body_is_exactly_the_size_fstat_saw(self):
+        # a file still growing used to overrun its Content-Length: model it by fstat
+        # reporting fewer bytes than read() would return
+        Path(self.share, "grow.log").write_bytes(b"a" * 100)
+        real = os.fstat
+        keep(self, (os, "fstat"))
+        os.fstat = lambda fd: (
+            os.stat_result((*real(fd)[:6], 60, *real(fd)[7:]))
+            if real(fd).st_size == 100
+            else real(fd)
+        )
+        status, hdrs, body = self.req("GET", "/files/grow.log")
+        self.assertEqual((status, hdrs["content-length"], body), (200, "60", b"a" * 60))
+
+    def test_a_file_that_shrank_ends_the_connection_after_its_bytes(self):
+        # fstat promised more than the file now holds: the short body can't be framed, so
+        # the server must close rather than wait on a kept-alive socket
+        Path(self.share, "shrink.log").write_bytes(b"b" * 100)
+        real = os.fstat
+        keep(self, (os, "fstat"))
+        os.fstat = lambda fd: (
+            os.stat_result((*real(fd)[:6], 150, *real(fd)[7:]))
+            if real(fd).st_size == 100
+            else real(fd)
+        )
+        resp = self.raw(
+            f"GET /files/shrink.log HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Cookie: rc_token={TOKEN}\r\n\r\n".encode()
+        )  # raw() reads to EOF: a kept-alive socket would time out here instead
+        head, _, body = resp.partition("\r\n\r\n")
+        self.assertIn("content-length: 150", head.lower())
+        self.assertEqual(body, "b" * 100)
+
+    def test_a_symlink_swapped_in_after_the_check_is_not_followed(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, True)
+        Path(outside, "secret").write_text("s3cret")
+        link = os.path.join(self.share, "late")
+        os.symlink(os.path.join(outside, "secret"), link)
+        # share_target() passed the plain file; by open() it is a symlink (the race)
+        keep(self, (rc_share, "share_target"))
+        rc_share.share_target = lambda rel: link
+        status, _, body = self.req("GET", "/files/late")
+        self.assertEqual(status, 404)
+        self.assertNotIn(b"s3cret", body)
+
+
+class UploadGuardTest(WebCase):
+    def put(self, path, body, **h):
+        headers = {"X-Rc-Offset": "0", "X-Rc-Total": str(len(body))} | h
+        return self.req("PUT", path, body=body, headers=headers)
+
+    def test_planted_symlink_temp_is_never_written_through(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, True)
+        victim = Path(outside, "bashrc")
+        victim.write_text("original")
+        os.symlink(victim, os.path.join(self.share, "f.bin.rcpart"))
+        _, hdrs, _ = self.req("HEAD", "/files/f.bin")
+        self.assertEqual(hdrs["x-rc-have"], "0")  # the link is not measured
+        status, _, body = self.put("/files/f.bin", b"PWNED!!!")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["done"])
+        self.assertEqual(victim.read_text(), "original")
+        self.assertFalse(os.path.exists(os.path.join(self.share, "f.bin")))
+
+    def test_temp_suffix_and_control_chars_are_bad_targets(self):
+        for path in ("/files/x.rcpart", "/files/a%0Afake", "/files/a%7F"):
+            status, hdrs, _ = self.put(path, b"x")
+            self.assertEqual((status, hdrs.get("connection")), (403, "close"), path)
+        self.assertEqual(os.listdir(self.share), [])
+
+    def test_size_cap_and_disk_floor_refuse_before_the_body(self):
+        rc_config.UPLOAD_MAX = 10
+        status, hdrs, body = self.put("/files/big.bin", b"x" * 11)
+        self.assertEqual((status, json.loads(body)["error"]), (413, "too large"))
+        self.assertEqual(hdrs.get("connection"), "close")
+        rc_config.UPLOAD_MAX = 1 << 40
+        rc_config.SHARE_MIN_FREE = 1 << 60  # more than any disk has free
+        status, _, body = self.put("/files/big.bin", b"x" * 11)
+        self.assertEqual(
+            (status, json.loads(body)["error"]), (507, "insufficient storage")
+        )
+        self.assertEqual(os.listdir(self.share), [])
+
+    def test_a_body_longer_than_total_is_refused(self):
+        status, _, body = self.put("/files/o.bin", b"x" * 10, **{"X-Rc-Total": "5"})
+        self.assertEqual((status, json.loads(body)["error"]), (400, "bad total"))
+
+
+class ShareUnitTest(unittest.TestCase):
+    def setUp(self):
+        restore_globals(self)
+        self.share = rc_config.SHARE = share_dir(self)
+
+    def test_listing_hrefs_are_requoted_from_the_raw_path(self):
+        os.makedirs(os.path.join(self.share, 'a"b'))
+        Path(self.share, 'a"b', "f.txt").write_text("x")
+        rows = rc_share.rows_html(os.path.join(self.share, 'a"b'), '/a"b')
+        self.assertIn('href="/files/a%22b/f.txt"', rows)
+        self.assertNotIn('a"b/', rows)
+        page = rc_share.share_page(os.path.join(self.share, 'a"b'), '/a"b').decode()
+        self.assertIn('REL="/a%22b"', page)
+
+    def test_upload_refusal_thresholds(self):
+        rc_config.UPLOAD_MAX, rc_config.SHARE_MIN_FREE = 100, 0
+        self.assertIsNone(rc_share.upload_refusal(100, 0))
+        self.assertEqual(rc_share.upload_refusal(101, 0), (413, "too large"))
+        keep(self, (shutil, "disk_usage"))
+        shutil.disk_usage = lambda path: SimpleNamespace(free=1000)
+        rc_config.SHARE_MIN_FREE = 950
+        rc_config.UPLOAD_MAX = 1 << 62
+        self.assertIsNone(rc_share.upload_refusal(40, 0))  # leaves 10 over the floor
+        self.assertIsNotNone(rc_share.upload_refusal(1000, 0))
+        self.assertIsNone(rc_share.upload_refusal(1000, 990))  # only the rest counts
 
 
 class ConfigTest(unittest.TestCase):
@@ -367,6 +533,15 @@ class RouteErrorTest(WebCase):
         d = json.loads(body)
         self.assertEqual((status, d["status"]), (200, "failed"))
         self.assertNotIn(rc_config.PARENT, d["reason"])
+
+    def test_put_with_transfer_encoding_is_refused(self):
+        resp = self.raw(
+            f"PUT /files/te.bin HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: rc_token={TOKEN}"
+            "\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n"
+            "5\r\nHELLO\r\n0\r\n\r\n".encode()
+        )
+        self.assertIn(" 411 ", resp.splitlines()[0])
+        self.assertFalse(os.path.exists(os.path.join(self.share, "te.bin")))
 
 
 class SettingsFailureTest(WebCase):

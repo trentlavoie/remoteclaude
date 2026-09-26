@@ -19,13 +19,12 @@ import functools
 import hmac
 import ipaddress
 import json
-import mimetypes
 import os
-import shutil
+import stat
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import rc_config as cfg
 import rc_desk
@@ -235,7 +234,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._settings(q)
             case "/launch" | "/stop":
                 return self._session_verb(u.path, q)
-            case path if _is_files(path):
+            case path if _is_files(path) and cfg.SHARE_ENABLED:
                 return self._files(path)
             case _:
                 self._send(404, b"not found")
@@ -326,7 +325,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed(parse_qs(u.query)) or not self._same_origin():
             # PUT carries a body we won't read -> close
             return self._send(403, b"forbidden", close=True)
-        if _is_files(u.path):
+        if _is_files(u.path) and cfg.SHARE_ENABLED:
             return self._upload(u.path)
         self._send(404, b"not found", close=True)
 
@@ -336,7 +335,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if not self._authed(parse_qs(u.query)) or not self._same_origin():
             return self._send(403, b"forbidden")
-        if _is_files(u.path):
+        if _is_files(u.path) and cfg.SHARE_ENABLED:
             return self._delete(u.path)
         self._send(404, b"not found")
 
@@ -350,6 +349,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, b"forbidden")
         have = 0
         if _is_files(u.path):
+            if not cfg.SHARE_ENABLED:
+                return self._send(404, b"not found")
             rel = u.path.removeprefix("/files")
             _, tmp = rc_share.part_paths(rel, self.headers.get("X-Rc-Id", ""))
             if tmp:
@@ -377,23 +378,30 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, b"not found")
 
     def _stream_file(self, target: str):
-        self.send_response(200)
-        self.send_header(
-            "Content-Type",
-            mimetypes.guess_type(target)[0] or "application/octet-stream",
-        )
-        self.send_header("Content-Length", str(os.path.getsize(target)))
-        self.send_header(
-            "Content-Disposition",
-            f"inline; filename*=UTF-8''{quote(os.path.basename(target))}",
-        )
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        with (
-            contextlib.suppress(BrokenPipeError, ConnectionResetError),
-            open(target, "rb") as f,
-        ):
-            shutil.copyfileobj(f, self.wfile, 65536)
+        """Exactly the size fstat'd at open (a file still growing used to overrun its
+        Content-Length and desync keep-alive), zero-copy via sendfile. O_NOFOLLOW: a final
+        component swapped for a symlink after share_target() checked it is refused."""
+        try:
+            # O_NONBLOCK: a FIFO swapped in can't park the thread in open(); no-op on a file
+            f = open(os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb")
+        except OSError:
+            return self._send(404, b"not found")
+        with f:
+            if not stat.S_ISREG((st := os.fstat(f.fileno())).st_mode):
+                return self._send(404, b"not found")
+            size = st.st_size
+            ctype, disposition, self._csp = rc_share.serve_as(target)
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", disposition)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            sent = 0
+            with contextlib.suppress(ConnectionError, TimeoutError):
+                sent = self.connection.sendfile(f, 0, size)
+            if sent != size:  # shrank or dropped mid-body: the framing is gone
+                self.close_connection = True
 
     @staticmethod
     def _uint(raw: str | None, default: int) -> int | None:
@@ -416,18 +424,23 @@ class Handler(BaseHTTPRequestHandler):
         if not rc_share.within_share(folder) or not os.path.isdir(folder):
             return self._json_error(404, "no such folder", close=True)
         length = self.headers.get("Content-Length")
-        if length is None or not length.isdigit():
+        # chunked (or CL+TE, an ambiguous smuggling shape) is never read as a length
+        chunked = "Transfer-Encoding" in self.headers
+        if chunked or length is None or not length.isdigit():
             return self._json_error(411, "length required", close=True)
         length = int(length)
         offset = self._uint(self.headers.get("X-Rc-Offset"), 0)
         if offset is None:
             return self._json_error(400, "bad offset", close=True)
         total = self._uint(self.headers.get("X-Rc-Total"), offset + length)
-        if total is None or total <= 0 or total < offset:
+        # offset+length past total would write beyond the size the caps were checked against
+        if total is None or total <= 0 or total < offset + length:
             return self._json_error(400, "bad total", close=True)
         have = rc_share.have(tmp)
         if offset > have:  # gap: client is ahead of us — tell it what we actually have
             return self._json_error(409, "gap", close=True, have=have)
+        if refusal := rc_share.upload_refusal(total, have):  # size cap / disk floor
+            return self._json_error(*refusal, close=True)
         remaining = self._drain_body(tmp, offset, length, target)
         # body not fully drained (drop or write error) — end the connection so its
         # leftover bytes can't be read as a next request
@@ -451,7 +464,9 @@ class Handler(BaseHTTPRequestHandler):
         sweep) — os.replace keeps the finalized file atomic regardless."""
         remaining = length
         try:
-            with open(tmp, "r+b" if rc_share.have(tmp) else "wb") as f:
+            # O_NOFOLLOW: a .rcpart planted as a symlink must not aim the write outside SHARE
+            fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666)
+            with open(fd, "r+b") as f:
                 f.seek(offset)
                 f.truncate(offset)
                 while remaining > 0 and (
@@ -516,8 +531,10 @@ if __name__ == "__main__":
         )
     print(
         f"rc-launcher on {cfg.BIND}:{cfg.PORT} parent={cfg.PARENT} spawn={rc_settings.spawn()}"
+        f" share={'on' if cfg.SHARE_ENABLED else 'off'}"
     )
     if cfg.TAILSCALE_USERS and cfg.BIND not in ("127.0.0.1", "::1", "localhost"):
         print("warning: RC_TAILSCALE_USERS is spoofable off loopback", flush=True)
-    threading.Thread(target=rc_share.sweep_loop, daemon=True).start()
+    if cfg.SHARE_ENABLED:
+        threading.Thread(target=rc_share.sweep_loop, daemon=True).start()
     Server((cfg.BIND, cfg.PORT), Handler).serve_forever()
