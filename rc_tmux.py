@@ -21,8 +21,20 @@ import time
 # RC_TMUX_BIN wins, then whatever is on PATH (the desk case), then Homebrew's path: the
 # service's minimal launchd PATH has no /opt/homebrew/bin, so `tmux` alone isn't found there.
 TMUX = os.environ.get("RC_TMUX_BIN") or shutil.which("tmux") or "/opt/homebrew/bin/tmux"
-# Every tmux call is bounded: a wedged server must fail the request, not hang a worker.
-TIMEOUT = float(os.environ.get("RC_TMUX_TIMEOUT") or "10")
+
+
+def _timeout(raw: str | None) -> float:
+    """RC_TMUX_TIMEOUT seconds, bounding every tmux call: a wedged server must fail the
+    request, not hang a worker. A bad/non-positive value is the 10s default rather than an
+    import error — the guard imports this on every desk `claude`."""
+    try:
+        t = float(raw or "10")
+    except ValueError:
+        return 10.0
+    return t if 0 < t <= 600 else 10.0
+
+
+TIMEOUT = _timeout(os.environ.get("RC_TMUX_TIMEOUT"))
 
 
 def _socket(raw: str) -> str:

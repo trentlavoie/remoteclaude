@@ -134,6 +134,12 @@ class TmuxUnitTest(unittest.TestCase):
             for bad in ("../x", "-x", "a b", "x" * 65, "/tmp/sock"):
                 self.assertEqual(rc_tmux._socket(bad), "rc-launcher", bad)
 
+    def test_timeout_parse_never_breaks_the_import(self):
+        self.assertEqual(rc_tmux._timeout(None), 10.0)
+        self.assertEqual(rc_tmux._timeout("2.5"), 2.5)
+        for bad in ("", "abc", "0", "-1", "nan", "inf", "1e9"):
+            self.assertEqual(rc_tmux._timeout(bad), 10.0, bad)
+
     def test_every_call_is_bounded(self):
         seen = {}
         subprocess.run = lambda cmd, **kw: seen.update(kw) or proc()
