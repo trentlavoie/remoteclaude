@@ -393,7 +393,8 @@ def create(proj: str) -> tuple[str, str | None]:
     except FileExistsError:  # an existing project, or a second tap racing the first
         return "exists", None
     except OSError as e:  # PARENT unwritable / missing mount: report, don't 500
-        return "failed", str(e)
+        # strerror only: str(e) carries the absolute path, which stays off the wire
+        return "failed", e.strerror or "create failed"
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         subprocess.run(
             [cfg.GIT, "init", "-q"], cwd=path, capture_output=True, timeout=30

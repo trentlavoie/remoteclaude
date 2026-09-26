@@ -20,6 +20,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import rc_config
 import rc_launcher
@@ -529,7 +530,10 @@ class ConfigTest(unittest.TestCase):
 
 class RouteErrorTest(WebCase):
     def test_create_os_error_is_a_reason_not_a_dropped_socket(self):
-        status, _, body = self.req("POST", f"/create?proj={'a' * 300}", headers=SAME)
+        # over-long names are now refused as badname before mkdir, so force the OSError
+        err = OSError(36, "File name too long", os.path.join(rc_config.PARENT, "p"))
+        with mock.patch.object(rc_sessions.os, "makedirs", side_effect=err):
+            status, _, body = self.req("POST", "/create?proj=rcmkdirfail", headers=SAME)
         d = json.loads(body)
         self.assertEqual((status, d["status"]), (200, "failed"))
         self.assertNotIn(rc_config.PARENT, d["reason"])

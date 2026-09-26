@@ -113,5 +113,5 @@ def set_toggle(name: str, on: bool) -> tuple[str, str | None]:
         if tmp:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
-        return "failed", str(e)
+        return "failed", e.strerror or "save failed"  # str(e) would leak the path
     return "set", None

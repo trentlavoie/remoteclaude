@@ -53,7 +53,7 @@ class SettingsTest(unittest.TestCase):
         # os.replace fails after mkstemp already made the temp: set_toggle must unlink it
         # (no orphaned settings.* left) and report "failed", never a half-written file
         def boom(*_a):
-            raise OSError("disk full")
+            raise OSError(28, "disk full")  # ENOSPC, as a real write reports it
 
         self.addCleanup(setattr, os, "replace", os.replace)
         os.replace = boom
