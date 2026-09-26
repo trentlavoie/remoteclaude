@@ -12,11 +12,10 @@ order they must happen in.
 
 import contextlib
 import html
-import json
 import os
 import re
+import shlex
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from types import MappingProxyType
@@ -26,7 +25,7 @@ import rc_desk
 import rc_git
 import rc_settings
 import rc_tmux
-from rc_claude import CLAUDE, auth_status
+from rc_claude import CLAUDE, auth_status, trust_dir
 from rc_page import PAGE
 from rc_state import RANK, STATE_DIR, valid_states
 from rc_templates import fill, js
@@ -108,37 +107,11 @@ def ensure_trusted(proj: str) -> None:
     """Pre-accept the workspace trust dialog for the project dir. `claude remote-control`
     refuses to start in an untrusted dir, exiting 1 before it registers with the relay — so
     the app never sees the session and the phone tap silently does nothing, and no trust
-    dialog is reachable from the phone. Atomic replace, and only when the flag is missing, to
-    avoid racing claude's own frequent writes to this file."""
-    key = cfg.project_dir(proj)
-    try:
-        d = json.loads(Path(cfg.CLAUDE_JSON).read_text())
-    except FileNotFoundError:
-        return  # no ~/.claude.json yet — nothing to pre-trust
-    except (OSError, json.JSONDecodeError) as e:
-        # unreadable/corrupt: surface it, don't 500 the launch
-        cfg.log_event("trust", proj, f"skip: {e}")
-        return
-    entry = d.setdefault("projects", {}).setdefault(key, {})
-    if entry.get("hasTrustDialogAccepted"):
-        return
-    entry.setdefault("allowedTools", [])
-    entry.setdefault("mcpServers", {})
-    entry["hasTrustDialogAccepted"] = True
-    # a UNIQUE temp in the same dir: two concurrent first-time-trust launches through a
-    # shared temp name could tear ~/.claude.json (and 500 the loser on a vanished temp).
-    fd, tmp = tempfile.mkstemp(
-        dir=os.path.dirname(cfg.CLAUDE_JSON), prefix=".claude.json.rc"
-    )
-    # disk full / unwritable: log and continue, don't 500 the launch or orphan a temp
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(d, f, indent=2)
-        os.replace(tmp, cfg.CLAUDE_JSON)
-    except OSError as e:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        cfg.log_event("trust", proj, f"skip write: {e}")
+    dialog is reachable from the phone. The careful write (atomic, fsync'd, 0600, re-merged
+    if a live claude wrote the file meanwhile) is rc_claude.trust_dir; a skip is logged,
+    never raised, so it can't 500 the launch."""
+    if why := trust_dir(cfg.CLAUDE_JSON, cfg.project_dir(proj)):
+        cfg.log_event("trust", proj, why)
 
 
 def rc_name(proj: str) -> str:
@@ -154,11 +127,13 @@ def fresh_cmd(proj: str, model: str | None = None) -> list[str]:
     neither the desk nor the launcher's own --continue can ever reopen (proven 2026-08-16).
     worktree/session keep the subcommand form — the flag form takes no --spawn, and those
     modes are isolated by design, so desk resumability isn't their point. --model pins the
-    session's model (global flag, so it precedes the remote-control subcommand); default pin."""
-    mflag = ["--model", model or rc_settings.MODEL]
+    session's model (global flag, so it precedes the remote-control subcommand); default pin.
+    An opt-in RC_PERMISSION_MODE pin rides on every form (a subcommand option there)."""
+    mflag, perm = ["--model", model or rc_settings.MODEL], rc_settings.permission_args()
     if (sp := rc_settings.spawn()) == "same-dir":
-        return [CLAUDE, *mflag, "--remote-control", rc_name(proj)]
-    return [CLAUDE, *mflag, "remote-control", "--name", rc_name(proj), "--spawn", sp]
+        return [CLAUDE, *mflag, *perm, "--remote-control", rc_name(proj)]
+    name = rc_name(proj)
+    return [CLAUDE, *mflag, "remote-control", "--name", name, "--spawn", sp, *perm]
 
 
 def launch_cmd(proj: str, model: str | None = None) -> tuple[list[str], bool]:
@@ -172,7 +147,8 @@ def launch_cmd(proj: str, model: str | None = None) -> tuple[list[str], bool]:
         "continue",
         "fork",
     ) and rc_settings.spawn() == "same-dir":
-        cmd = [CLAUDE, "--model", model or rc_settings.MODEL, "--continue"]
+        cmd = [CLAUDE, "--model", model or rc_settings.MODEL]
+        cmd += [*rc_settings.permission_args(), "--continue"]
         if res == "fork":
             cmd.append("--fork-session")
         return [*cmd, "--remote-control", rc_name(proj)], True
@@ -197,7 +173,7 @@ def has_desk_thread(proj: str) -> bool:
 
 def death_reason(sess: str) -> str:
     """Why a just-launched RC session died, read from its dead pane."""
-    out = rc_tmux.tmux("capture-pane", "-t", f"={sess}", "-p").stdout
+    out = rc_tmux.tmux("capture-pane", "-t", rc_tmux.pane(sess), "-p").stdout
     last = next(
         (
             s
@@ -232,10 +208,12 @@ def _settle_prompt(sess: str, proj: str) -> str:
     9h/833k-token thread). Returns '' when there is no prompt or it was answered;
     a death reason for an UNKNOWN confirm-style prompt (fail loudly, never
     phantom-succeed)."""
-    pane = rc_tmux.tmux("capture-pane", "-t", f"={sess}", "-p").stdout
+    pane = rc_tmux.tmux("capture-pane", "-t", rc_tmux.pane(sess), "-p").stdout
     for sentinel, (keys, note) in _PROMPT_ANSWERS.items():
         if sentinel in pane:
-            rc_tmux.tmux("send-keys", "-t", f"={sess}", *keys)
+            # fixed key NAMES from the policy table, never pane text: nothing read back
+            # from the session is ever typed into it
+            rc_tmux.tmux("send-keys", "-t", rc_tmux.pane(sess), *keys)
             cfg.log_event("launch", proj, note)
             return ""
     if "Enter to confirm" in pane:
@@ -249,36 +227,34 @@ def _spawn(sess: str, proj: str, cmd: list[str], env_opts: list[str]) -> str:
     after the startup window, else the death reason (and kills the session). RC
     dies within ~2s on any startup error — untrusted dir, expired login, or
     nothing to --continue — taking its tmux session with it; remain-on-exit
-    holds the dead pane so death_reason can read WHY."""
+    holds the dead pane so death_reason can read WHY. tmux hands its one command string
+    to `sh -c`, so it is shlex.join'd — every word quoted, never re-parsed as syntax (a
+    plain word is left bare, so the line reads as before) — after a `--`."""
+    root = cfg.project_dir(proj)
     # raw subprocess.run so new-session stderr hits the log; nonzero = name taken, bail
-    if subprocess.run(
-        [
-            rc_tmux.TMUX,
-            "new-session",
-            "-d",
-            "-s",
-            sess,
-            *env_opts,
-            "-c",
-            cfg.project_dir(proj),
-            " ".join(cmd),
-        ],
-        check=False,
-    ).returncode:
+    try:
+        rc = subprocess.run(
+            rc_tmux.argv("new-session", "-d", "-s", sess, *env_opts, "-c", root)
+            + ["--", shlex.join(cmd)],
+            env=rc_tmux.client_env(),
+            timeout=rc_tmux.TIMEOUT,
+        ).returncode
+    except subprocess.TimeoutExpired:
+        return "tmux new-session timed out"
+    if rc:
         return "tmux new-session failed"
-    rc_tmux.tmux("set-option", "-t", f"={sess}", "remain-on-exit", "on")
+    pane = rc_tmux.pane(sess)
+    rc_tmux.tmux("set-option", "-t", pane, "remain-on-exit", "on")
     time.sleep(3)
-    dead = rc_tmux.tmux(
-        "list-panes", "-t", f"={sess}", "-F", "#{pane_dead}"
-    ).stdout.strip()
+    dead = rc_tmux.tmux("list-panes", "-t", pane, "-F", "#{pane_dead}").stdout.strip()
     if dead != "0":
         reason = death_reason(sess)
-        rc_tmux.tmux("kill-session", "-t", f"={sess}")
+        rc_tmux.tmux("kill-session", "-t", rc_tmux.target(sess))
         return reason
     if reason := _settle_prompt(sess, proj):
-        rc_tmux.tmux("kill-session", "-t", f"={sess}")
+        rc_tmux.tmux("kill-session", "-t", rc_tmux.target(sess))
         return reason
-    rc_tmux.tmux("set-option", "-t", f"={sess}", "remain-on-exit", "off")
+    rc_tmux.tmux("set-option", "-t", pane, "remain-on-exit", "off")
     return ""
 
 
@@ -376,21 +352,32 @@ def _pid_stop(proj, close, event, cache) -> tuple[str, str | None]:
 def desk_stop(proj: str) -> tuple[str, str | None]:
     """✕ on a desk-badged row: close the project's auto-paired desk claude. Kept separate
     from stop() on purpose — reaping a desk claude (the user's own desktop session) stays an
-    explicit action, never something a plain /stop falls into."""
+    explicit action, never something a plain /stop falls into. RC_TAKEOVER=0 turns it off
+    entirely (a shared/headless host where a desk claude may be someone's live work): the
+    launcher then never signals a desk process, and says so instead of reporting "idle"."""
+    if not rc_desk.TAKEOVER:
+        return "failed", "closing desk sessions is disabled (RC_TAKEOVER=0)"
     return _pid_stop(proj, rc_desk.takeover, "stopdesk", rc_desk.desk_projects)
+
+
+# one dir entry + one tmux session name; over-long is "badname", not an OSError 500
+MAX_NAME = 64
 
 
 def create(proj: str) -> tuple[str, str | None]:
     """Make a new project dir under PARENT, git-init it, drop a CLAUDE.md stub.
 
-    NAME_RE keeps proj a single path segment, so it can't escape PARENT. git
-    runs best-effort: if it's missing the dir and CLAUDE.md still stand and the
-    session launches anyway. The route launches it after this returns 'created'.
+    fullmatch, not match: NAME_RE's `$` also matches before a trailing newline, so
+    "name%0A" made a dir whose name ends in a newline. So validated, proj is one ASCII
+    segment (no '/', '..', leading '.'/'-'/'_'): it can't escape PARENT or read as an
+    option. git runs best-effort and bounded: missing or hung, the dir and CLAUDE.md still
+    stand and the session launches anyway. The route launches it after 'created'.
     """
-    if not cfg.NAME_RE.match(proj):
+    if len(proj) > MAX_NAME or not cfg.NAME_RE.fullmatch(proj):
         return (
             "badname",
-            "start with a letter or digit, then letters/digits/dash/underscore",
+            "start with a letter or digit, then letters/digits/dash/underscore"
+            f" (at most {MAX_NAME})",
         )
     # a category dir, not a project: /create bypasses the membership guard, so this would
     # otherwise spawn an rc-<group> session projects() never lists and /stop can't reach
@@ -405,6 +392,13 @@ def create(proj: str) -> tuple[str, str | None]:
         os.makedirs(path)
     except FileExistsError:  # an existing project, or a second tap racing the first
         return "exists", None
-    subprocess.run([cfg.GIT, "init", "-q"], cwd=path, capture_output=True)
-    Path(path, "CLAUDE.md").write_text(f"# {proj}\n")
+    except OSError as e:  # PARENT unwritable / missing mount: report, don't 500
+        return "failed", str(e)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            [cfg.GIT, "init", "-q"], cwd=path, capture_output=True, timeout=30
+        )
+    # "x": create-only, never written through a name that appeared under us
+    with contextlib.suppress(OSError), open(Path(path, "CLAUDE.md"), "x") as f:
+        f.write(f"# {proj}\n")
     return "created", None

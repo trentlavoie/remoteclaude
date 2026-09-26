@@ -13,6 +13,15 @@ from concurrent.futures import ThreadPoolExecutor
 import rc_config as cfg
 
 
+# The launcher runs git in every repo under PARENT on each /status poll — outside any
+# claude permission prompt. Repo-local config must not turn that into code execution:
+# core.fsmonitor names a command `git status` runs (verified: a planted fsmonitor fires on
+# a plain status), and hooks (reference-transaction on snapshot's update-ref) likewise.
+# Empty fsmonitor = off on every git version (old ones read it as a hook path).
+_NO_REPO_EXEC = ("-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null")
+SNAPSHOT_TIMEOUT = 15.0
+
+
 def _git(path: str, *args: str, text: bool = True, **kw) -> subprocess.CompletedProcess:
     """A git call against path's work tree, output captured — the git counterpart of
     tmux(). `-C` rather than cwd= so the argv carries its own root, and no OSError
@@ -24,7 +33,7 @@ def _git(path: str, *args: str, text: bool = True, **kw) -> subprocess.Completed
     return code: decoding is strict, and an undecodable byte in git's stderr would
     otherwise raise out of an unguarded launch()."""
     return subprocess.run(
-        [cfg.GIT, "--no-optional-locks", "-C", path, *args],
+        [cfg.GIT, "--no-optional-locks", *_NO_REPO_EXEC, "-C", path, *args],
         capture_output=True,
         text=text,
         **kw,
@@ -83,16 +92,24 @@ def snapshot(proj: str) -> str | None:
     Opt-in via RC_SNAPSHOT — same-dir means a phone-driven turn lands on the same
     working tree you edit locally, so this parks the current tree+index as a stash
     commit under refs/rc-snapshots/ (kept off `git stash list`). Recover with
-    `git stash apply <ref>`. Returns the ref, or None if off / clean / not a repo.
+    `git stash apply <ref>`. Returns the ref, or None if off / clean / not a repo — or
+    when git is missing or hangs: a checkpoint is best-effort, never a failed launch.
     """
     if not os.environ.get("RC_SNAPSHOT"):
         return None
     path = cfg.project_dir(proj)
-    if _git(path, "rev-parse", "--is-inside-work-tree", text=False).returncode != 0:
+    t = SNAPSHOT_TIMEOUT
+    try:
+        if _git(
+            path, "rev-parse", "--is-inside-work-tree", text=False, timeout=t
+        ).returncode:
+            return None
+        sha = _git(path, "stash", "create", timeout=t).stdout.strip()
+        if not sha:
+            return None
+        ref = f"refs/rc-snapshots/{proj}/{int(time.time())}"
+        msg = f"rc-snapshot {proj}"
+        _git(path, "update-ref", "-m", msg, ref, sha, text=False, timeout=t)
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
-    sha = _git(path, "stash", "create").stdout.strip()
-    if not sha:
-        return None
-    ref = f"refs/rc-snapshots/{proj}/{int(time.time())}"
-    _git(path, "update-ref", "-m", f"rc-snapshot {proj}", ref, sha, text=False)
     return ref

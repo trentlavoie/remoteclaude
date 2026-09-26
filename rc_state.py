@@ -7,7 +7,9 @@ hook's event map simply fell out of the launcher's rank filter with no error.
 """
 
 import json
+import math
 import os
+import stat
 import time
 from pathlib import Path
 from types import MappingProxyType
@@ -30,20 +32,55 @@ EVENT_STATE = MappingProxyType(
 )
 
 
+MAX_STATE_BYTES = 64 * 1024  # a real state file is ~200 bytes
+
+
+def _load(f: Path) -> dict | None:
+    """One state file as a dict, or None. Opened non-blocking and no-follow, and only a
+    small regular file is read: the launcher's /status poll and the shell prompt both land
+    here, so a FIFO, a symlink or a huge file dropped in the dir must be skipped, never
+    hang or stall them. ValueError covers bad JSON and non-UTF8 alike."""
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            raw = fh.read(MAX_STATE_BYTES + 1)
+            d = json.loads(raw) if len(raw) <= MAX_STATE_BYTES else None
+        except (OSError, ValueError):
+            return None
+    return d if isinstance(d, dict) else None
+
+
+def _fresh(d: dict, now: float) -> bool:
+    """A known state, a real finite timestamp within STATE_TTL, and string-typed
+    project/cwd — the shape every reader indexes into without further checks."""
+    ts, st = d.get("ts", 0), d.get("state")
+    return (
+        isinstance(st, str)  # an unhashable state would TypeError the RANK lookup
+        and st in RANK
+        and isinstance(ts, (int, float))
+        and not isinstance(ts, bool)
+        and math.isfinite(ts)
+        and now - ts <= STATE_TTL
+        and all(isinstance(d.get(k, ""), str) for k in ("project", "cwd"))
+    )
+
+
 def valid_states(state_dir: Path, now: float | None = None) -> list[dict]:
     """State files in state_dir that parse, are fresh (within STATE_TTL), and carry a known
     state — the single read filter behind the launcher's session_states() and rc_status's
-    live(), so the on-disk schema and the staleness rule live in one place, not two. A corrupt
-    or unreadable file is skipped, never raised (rc_status runs in the zsh RPROMPT). state_dir
-    is a parameter because each caller redirects its own STATE_DIR (tests, and the env override
-    resolved at import in each module)."""
+    live(), so the on-disk schema and the staleness rule live in one place, not two. A corrupt,
+    mistyped or unreadable file is skipped, never raised (rc_status runs in the zsh RPROMPT,
+    and a raise here would 500 the launcher's /status). state_dir is a parameter because each
+    caller redirects its own STATE_DIR (tests, and the env override resolved at import in
+    each module)."""
     now = time.time() if now is None else now
-    out = []
-    for f in state_dir.glob("*.json"):
-        try:
-            d = json.loads(f.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if d.get("state") in RANK and now - d.get("ts", 0) <= STATE_TTL:
-            out.append(d)
-    return out
+    return [
+        d
+        for f in state_dir.glob("*.json")
+        if (d := _load(f)) is not None and _fresh(d, now)
+    ]

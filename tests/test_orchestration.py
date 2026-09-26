@@ -376,6 +376,9 @@ class OrchestrationTest(MockedToolsCase):
         # stays up — verified live on 2.1.260), both before the kill fallback
         self.assertEqual(len(presses), 2)
         self.assertLess(presses[-1], kill)
+        # ...aimed at the PANE form: `send-keys -t =rc-proj` is "can't find pane" on tmux
+        # 3.4, so every graceful stop silently degraded to the SIGHUP kill
+        self.assertTrue(all("-t =rc-proj: C-c" in cmds[i] for i in presses))
 
     def test_stop_idle_when_no_session_exists(self):
         # a wrong/unmanaged proj (no rc-<proj> session) must read "idle", not "stopped" —
@@ -400,14 +403,23 @@ class OrchestrationTest(MockedToolsCase):
     def test_tmux_targets_are_exact_match(self):
         # A bare -t prefix-matches: with rc-proj absent and rc-proj-sub live, has_session
         # (live_kind) and stop() would target the SIBLING's session (verified against a live
-        # tmux). Every -t target must be the exact-match `=name` form.
+        # tmux). Every -t target must be exact: `=name` for session verbs, `=name:` for the
+        # window/pane verbs — tmux 3.4 rejects a bare `=name` for send-keys/capture-pane/
+        # set-option ("can't find pane") and resolves it as a WINDOW name for list-panes.
         rc_settings.RESUME, rc_settings.SPAWN = "continue", "same-dir"
         self.responses = spawn_ok()
         rc_sessions.launch("proj")
         rc_sessions.stop("proj")
-        targets = [c[i + 1] for c in self.calls for i, a in enumerate(c) if a == "-t"]
-        self.assertGreaterEqual(len(targets), 5)  # spawn control calls + stop's pair
-        self.assertEqual(set(targets), {"=rc-proj"})
+        by_verb = [
+            (c[c.index("-t") - 1], c[c.index("-t") + 1])
+            for c in self.calls
+            if "-t" in c
+        ]
+        self.assertGreaterEqual(len(by_verb), 5)  # spawn control calls + stop's pair
+        session_verbs = {"has-session", "kill-session"}
+        for verb, tgt in by_verb:
+            want = "=rc-proj" if verb in session_verbs else "=rc-proj:"
+            self.assertEqual(tgt, want, verb)
 
     # --- login_status / running ---
 
