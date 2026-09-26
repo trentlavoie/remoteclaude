@@ -100,7 +100,8 @@ class RenderTest(unittest.TestCase):
         for name in UNITS:
             with self.subTest(unit=name):
                 self.assertIn(
-                    "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                    "Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:"
+                    "/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin",
                     u[name],
                 )
                 # settings come from the 0600 env file, never inline Environment=RC_...

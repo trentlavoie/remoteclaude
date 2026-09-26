@@ -13,13 +13,13 @@ Documentation=file://@REPO@/RUNBOOK.md
 [Service]
 Type=oneshot
 EnvironmentFile=%h/.config/rc-launcher/rc-launcher.env
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 WorkingDirectory=@REPO@
 ExecStart=@PYTHON@ -E -s -u @REPO@/rc_healthcheck.py
 TimeoutStartSec=2min
 UMask=0077
 MemoryMax=1G
-TasksMax=64
+TasksMax=128
 # same seccomp/prctl-only hardening as rc-launcher.service (see the notes there)
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes

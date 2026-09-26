@@ -123,9 +123,9 @@ fi
 
 # --- the launcher must only listen on loopback -----------------------------------------------
 if command -v ss >/dev/null &&
-	ss -Hltn "sport = :$LPORT" 2>/dev/null | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*|\[::\]):'; then
-	die "something listens on ALL interfaces on :$LPORT -- this host has a public IP.
-   The launcher must bind 127.0.0.1 (rc-launcher.service pins it; check 'ss -ltnp')."
+	ss -Hltn "sport = :$LPORT" 2>/dev/null | awk '{print $4}' | grep -Evq '^(127\.[0-9.]+|\[::1\]):'; then
+	die "something listens on :$LPORT beyond loopback (all interfaces, or a public/tailnet
+   address). The launcher must bind 127.0.0.1 only (rc-launcher.service pins it; check 'ss -ltnp')."
 fi
 
 # --- configure (idempotent) ------------------------------------------------------------------

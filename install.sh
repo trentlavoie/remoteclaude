@@ -166,7 +166,9 @@ echo "==> rc-launcher install (repo: $REPO, os: $OS)"
 
 # 1. tmux holds each session so it survives the request returning. Not installed from here:
 #    that would need sudo, which this script never runs.
-TMUX_BIN="${RC_TMUX_BIN:-$(command -v tmux || true)}"
+# (Linux ignores RC_TMUX_BIN: the units pin deploy/rc-tmux, and a shell that exports
+#  RC_TMUX_BIN for the desk guard points it at that shim, not at tmux itself)
+if [ "$OS" = Linux ]; then TMUX_BIN="$(command -v tmux || true)"; else TMUX_BIN="${RC_TMUX_BIN:-$(command -v tmux || true)}"; fi
 if [ -z "$TMUX_BIN" ]; then
   case "$OS" in
     Darwin) brew install tmux && TMUX_BIN="$(command -v tmux)" ;;
@@ -177,7 +179,7 @@ if [ "$OS" = Linux ]; then
   # rc-tmux.service runs `tmux -D` (3.2+) found through the units' PATH
   case "$(dirname "$TMUX_BIN")" in
     "$HOME/.local/bin" | /usr/local/bin | /usr/bin | /bin) ;;
-    *) die "tmux at $TMUX_BIN is not on the units' PATH (~/.local/bin:/usr/local/bin:/usr/bin:/bin)" ;;
+    *) die "tmux at $TMUX_BIN is not in ~/.local/bin, /usr/local/bin, /usr/bin or /bin (the units' PATH)" ;;
   esac
   tv="$("$TMUX_BIN" -V)"
   tv="${tv#tmux }"

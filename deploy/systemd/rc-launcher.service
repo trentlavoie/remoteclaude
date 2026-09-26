@@ -16,7 +16,8 @@ After=rc-tmux.service
 Type=simple
 # Settings (0600, written by install.sh). Holds no secret: the token has its own 0600 file.
 EnvironmentFile=%h/.config/rc-launcher/rc-launcher.env
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# the launcher hands this PATH to every session it starts (tmux -e), so keep it complete
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 WorkingDirectory=@REPO@
 # Two settings are pinned HERE, not in the env file, because EnvironmentFile= overrides
 # Environment= and neither may be changed by an edit to that file:

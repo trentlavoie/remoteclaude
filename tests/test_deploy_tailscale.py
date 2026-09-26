@@ -145,14 +145,20 @@ class TailscaleServeTest(unittest.TestCase):
         self.assertIn("not replacing", r.stderr)
         self.assertEqual(self.serve_calls(), [])
 
-    def test_refuses_when_the_launcher_port_is_on_all_interfaces(self):
-        (self.tmp / "ss").write_text(
-            f"LISTEN 0 5 0.0.0.0:{self.lport} 0.0.0.0:* users:((python3))\n"
-        )
-        r = self.run_script()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("ALL interfaces", r.stderr)
-        self.assertEqual(self.serve_calls(), [])
+    def test_refuses_when_the_launcher_port_is_beyond_loopback(self):
+        for addr in ("0.0.0.0", "*", "[::]", "203.0.113.7", "100.64.0.9"):
+            with self.subTest(addr=addr):
+                (self.tmp / "ss").write_text(
+                    f"LISTEN 0 5 {addr}:{self.lport} 0.0.0.0:* users:((python3))\n"
+                )
+                r = self.run_script()
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("beyond loopback", r.stderr)
+                self.assertEqual(self.serve_calls(), [])
+        for addr in ("127.0.0.1", "[::1]"):  # loopback only: fine
+            with self.subTest(addr=addr):
+                (self.tmp / "ss").write_text(f"LISTEN 0 5 {addr}:{self.lport} x\n")
+                self.assertEqual(self.run_script().returncode, 0)
 
     def test_prerequisites_are_explained(self):
         for kwargs, needle in (

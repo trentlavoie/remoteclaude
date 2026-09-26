@@ -20,7 +20,7 @@ Documentation=file://@REPO@/RUNBOOK.md
 [Service]
 Type=simple
 # claude, node, uv/uvx and anything a session runs by name live in ~/.local/bin
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 # /run/user/<uid>/rc-tmux (0700): exists exactly while this unit runs
 RuntimeDirectory=rc-tmux
 RuntimeDirectoryMode=0700
