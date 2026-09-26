@@ -2,6 +2,28 @@
 
 Human-facing chronological record; newest first. One entry per change — what and why.
 
+- 2026-09-26: Linux + Tailscale deployment (fork). The Linux install now runs three
+  systemd --user units: `rc-tmux.service` owns a dedicated tmux server (exact socket
+  `$XDG_RUNTIME_DIR/rc-tmux/tmux.sock`, reached only through `deploy/rc-tmux`, which is
+  what `RC_TMUX_BIN` points at), `rc-launcher.service` (loopback bind and the tmux client
+  pinned in `ExecStart`, settings from a 0600 `~/.config/rc-launcher/rc-launcher.env`,
+  userns-free hardening, restart with backoff) and the watchdog timer. Before, the
+  launcher's first `tmux new-session` started the server inside the launcher's own cgroup
+  (or joined the personal default server), so `install.sh --reload` killed every session.
+  Unit templates moved to `deploy/systemd/`; `install.sh --render DIR` writes what it
+  would install. `install.sh` no longer runs sudo or `loginctl enable-linger` (it checks
+  and prints), writes the token via mktemp+rename, and edits `~/.claude/settings.json`
+  only on `--hook`, through `deploy/claude-settings.sh` (0600 timestamped backup, edit a
+  private copy, atomic rename; `uninstall.sh` uses the same path to remove it). Fixed:
+  `GROUPS=` assigned bash's magic `GROUPS` array, so every install wrote
+  `RC_PROJECT_GROUPS=<gid>`; `uninstall.sh` aborted (set -e + pipefail) when no rc-*
+  session existed and never removed the hook. New `deploy/tailscale-serve.sh` publishes
+  the loopback launcher on the tailnet over HTTPS (never Funnel; refuses while one is on),
+  `docs/TAILSCALE.md` covers install, policy, why HTTPS, and firewalling. The watchdog
+  logs every alert to the journal, pushes only to http(s) `RC_NOTIFY_URL`s without ever
+  logging the URL, and exits non-zero on a problem. Upgrading a Linux host from the old
+  single unit ends the sessions running inside it once (they lived in its cgroup).
+
 - 2026-09-19: Fix a Linux-only flaky-CI bug in RouteTest — its setUp mocked subprocess but,
   unlike MockedToolsCase, never forced `os.path.islink` to False, so desk detection read the
   runner's real `/proc/<pid>/cwd` whenever the test's fake pid (321) collided with a live
