@@ -57,7 +57,7 @@ class RowsHtmlTest(unittest.TestCase):
         # async function would leave the page dead while every substring above still matched
         if not (node := shutil.which("node")):
             self.skipTest("node not installed")
-        script = re.search(r"<script>(.*)</script>", out, re.S).group(1)
+        script = re.search(r"<script[^>]*>(.*)</script>", out, re.S).group(1)
         path = os.path.join(self.share, "page.js")
         Path(path).write_text(script)
         self.assertEqual(subprocess.run([node, "--check", path]).returncode, 0)
@@ -109,12 +109,22 @@ class RouteTest(ServerCase):
         rc_settings.RESUME = (
             "off"  # fresh launches (no takeover) keep route tests simple
         )
+        rc_config.ALLOW_GET_ACTIONS = (
+            False  # the shipped default: state changes are POST
+        )
 
     def _resp(self, cmd):
         return respond(cmd, self.desk, self.responses)
 
     def get(self, path):
         status, _, body = self.req("GET", path)
+        return status, body
+
+    def post(self, path):
+        """A state change the way the page sends it: POST, same-origin."""
+        status, _, body = self.req(
+            "POST", path, headers={"Sec-Fetch-Site": "same-origin"}
+        )
         return status, body
 
     def test_status_route(self):
@@ -162,40 +172,40 @@ class RouteTest(ServerCase):
             self.assertIn(f"data-sec={sec}", out)
         if not (node := shutil.which("node")):
             self.skipTest("node not installed")
-        script = re.search(r"<script>(.*)</script>", out, re.S).group(1)
+        script = re.search(r"<script[^>]*>(.*)</script>", out, re.S).group(1)
         path = os.path.join(self.aux, "page.js")
         Path(path).write_text(script)
         self.assertEqual(subprocess.run([node, "--check", path]).returncode, 0)
 
     def test_create_route_makes_and_launches(self):
         self.responses = spawn_ok()
-        status, body = self.get("/create?proj=newp")
+        status, body = self.post("/create?proj=newp")
         d = json.loads(body)
         self.assertEqual(d["status"], "created")
         self.assertEqual(d["launch"], "launched")
         self.assertTrue(os.path.isdir(os.path.join(rc_config.PARENT, "newp")))
 
     def test_create_route_bad_name_reports_reason(self):
-        status, body = self.get("/create?proj=bad%20name")  # space -> badname + reason
+        status, body = self.post("/create?proj=bad%20name")  # space -> badname + reason
         d = json.loads(body)
         self.assertEqual(d["status"], "badname")
         self.assertIn("reason", d)
 
     def test_launch_route_unknown_project_404(self):
-        self.assertEqual(self.get("/launch?proj=ghost")[0], 404)
+        self.assertEqual(self.post("/launch?proj=ghost")[0], 404)
 
     def test_launch_and_stop_routes(self):
         os.makedirs(os.path.join(rc_config.PARENT, "realp"))
         self.responses = spawn_ok()
         self.assertEqual(
-            json.loads(self.get("/launch?proj=realp&json=1")[1])["status"], "launched"
+            json.loads(self.post("/launch?proj=realp&json=1")[1])["status"], "launched"
         )
         # model a live session that dies on the C-c, so /stop reports a real kill
         seq = iter([True, False, False, False])
         self.addCleanup(setattr, rc_tmux, "has_session", rc_tmux.has_session)
         rc_tmux.has_session = lambda s: next(seq, False)
         self.assertEqual(
-            json.loads(self.get("/stop?proj=realp&json=1")[1])["status"], "stopped"
+            json.loads(self.post("/stop?proj=realp&json=1")[1])["status"], "stopped"
         )
 
     def test_stop_desk_route_sigterms_desk_session(self):
@@ -217,7 +227,7 @@ class RouteTest(ServerCase):
             self._resp(cmd),
         )[1]
         self.desk = {"321": desk(root)}
-        status, body = self.get("/stop?proj=deskp&desk=1&json=1")
+        status, body = self.post("/stop?proj=deskp&desk=1&json=1")
         self.assertEqual(json.loads(body)["status"], "stopped")
         self.assertIn((321, signal.SIGTERM), killed)  # graceful desk close
         self.assertNotIn((321, signal.SIGKILL), killed)
@@ -242,7 +252,7 @@ class RouteTest(ServerCase):
             "has-session": proc(returncode=1)
         }  # not a tmux session -> the fallback
         self.desk = {"321": desk(root, command="claude --remote-control extp")}
-        status, body = self.get("/stop?proj=extp&json=1")  # NO ext=1
+        status, body = self.post("/stop?proj=extp&json=1")  # NO ext=1
         self.assertEqual(json.loads(body)["status"], "stopped")
         self.assertIn((321, signal.SIGTERM), killed)
         joined = [" ".join(map(str, c)) for c in calls]
@@ -258,25 +268,25 @@ class RouteTest(ServerCase):
         os.kill = lambda pid, sig: killed.append((pid, sig))
         self.responses = {"has-session": proc(returncode=1)}  # no tmux session
         self.desk = {"321": desk(root)}  # a plain desk claude, no --remote-control
-        status, body = self.get("/stop?proj=deskonly&json=1")
+        status, body = self.post("/stop?proj=deskonly&json=1")
         self.assertEqual(
             json.loads(body)["status"], "idle"
         )  # nothing an RC-stop can close
         self.assertEqual(killed, [])  # the desk claude was left alone
 
     def test_addroot_requires_the_token(self):
-        self.assertEqual(self.req("GET", "/addroot?path=/tmp", cookie=False)[0], 403)
+        self.assertEqual(self.req("POST", "/addroot?path=/tmp", cookie=False)[0], 403)
 
     def test_addroot_adds_a_directory_and_lists_its_children(self):
         extra = os.path.join(self.aux, "extra")
         os.makedirs(os.path.join(extra, "sub"))
-        status, _, body = self.req("GET", f"/addroot?path={extra}")
+        status, _, body = self.req("POST", f"/addroot?path={extra}")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["status"], "added")
         projs = json.loads(self.req("GET", "/status")[2])["projects"]
         self.assertIn("extra/sub", projs)  # the new root's child now lists
         self.assertEqual(
-            json.loads(self.req("GET", "/addroot?path=/no/such")[2])["status"],
+            json.loads(self.req("POST", "/addroot?path=/no/such")[2])["status"],
             "badpath",
         )
 
@@ -293,7 +303,7 @@ class RouteTest(ServerCase):
         os.makedirs(os.path.join(rc_config.PARENT, "p"))
         rc_config.STOP_WAIT = 0
         self.responses = {"has-session": proc(returncode=0)}
-        status, body = self.get("/stop?proj=p&json=1")
+        status, body = self.post("/stop?proj=p&json=1")
         self.assertEqual(status, 200)
         self.assertEqual(
             json.loads(body),
@@ -313,7 +323,7 @@ class RouteTest(ServerCase):
         os.kill = lambda pid, sig: killed.append((pid, sig))
         self.desk = {"321": desk(os.path.join(rc_config.PARENT, "p"))}
         self.responses = {"has-session": proc(returncode=1)}  # no tmux session
-        status, body = self.get("/launch?proj=p&json=1")
+        status, body = self.post("/launch?proj=p&json=1")
         d = json.loads(body)
         self.assertEqual(d["status"], "already")
         self.assertEqual(d["kind"], "desk")
@@ -333,7 +343,7 @@ class RouteTest(ServerCase):
     def test_launch_json_failure_carries_reason(self):
         os.makedirs(os.path.join(rc_config.PARENT, "p"))
         self.responses = self._dead_spawn()
-        status, body = self.get("/launch?proj=p&json=1")
+        status, body = self.post("/launch?proj=p&json=1")
         self.assertEqual(status, 200)
         self.assertEqual(
             json.loads(body),
@@ -347,7 +357,7 @@ class RouteTest(ServerCase):
         real = subprocess.run
         subprocess.run = lambda cmd, **kw: (calls.append(cmd), real(cmd, **kw))[1]
         self.responses = spawn_ok()
-        status, body = self.get("/launch?proj=p&model=opus&json=1")
+        status, body = self.post("/launch?proj=p&model=opus&json=1")
         self.assertEqual(json.loads(body)["status"], "launched")
         newsession = next(c for c in calls if "new-session" in " ".join(map(str, c)))
         self.assertIn("--model claude-opus-5 --remote-control", newsession[-1])
@@ -357,7 +367,7 @@ class RouteTest(ServerCase):
         os.makedirs(os.path.join(rc_config.PARENT, "p"))
         killed = []
         os.kill = lambda pid, sig: killed.append((pid, sig))
-        status, body = self.get("/launch?proj=p&model=gpt-9&json=1")
+        status, body = self.post("/launch?proj=p&model=gpt-9&json=1")
         d = json.loads(body)
         self.assertEqual(d["status"], "failed")
         self.assertIn("unknown model 'gpt-9'", d["reason"])
@@ -368,14 +378,14 @@ class RouteTest(ServerCase):
         os.makedirs(os.path.join(rc_config.PARENT, "p"))
         self.desk = {"321": desk(os.path.join(rc_config.PARENT, "p"))}
         self.responses = {"has-session": proc(returncode=1)}  # no tmux session
-        d = json.loads(self.get("/launch?proj=p&model=opus&json=1")[1])
+        d = json.loads(self.post("/launch?proj=p&model=opus&json=1")[1])
         self.assertEqual(d["status"], "already")
         self.assertEqual(d["kind"], "desk")
         self.assertIn("model not applied", d["note"])
 
     def test_create_then_failed_launch_carries_launch_reason(self):
         self.responses = self._dead_spawn()
-        status, body = self.get("/create?proj=newproj")
+        status, body = self.post("/create?proj=newproj")
         self.assertEqual(status, 200)
         payload = json.loads(body)
         self.assertEqual((payload["status"], payload["launch"]), ("created", "failed"))
@@ -385,7 +395,7 @@ class RouteTest(ServerCase):
         # the browser form (no json=1) gets the launcher page back, not JSON
         os.makedirs(os.path.join(rc_config.PARENT, "p"))
         self.responses = spawn_ok()
-        status, body = self.get("/launch?proj=p")
+        status, body = self.post("/launch?proj=p")
         self.assertEqual(status, 200)
         self.assertTrue(body.lstrip().lower().startswith(b"<!doctype html"), body[:40])
 

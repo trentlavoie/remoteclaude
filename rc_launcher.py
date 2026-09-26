@@ -15,14 +15,15 @@ to start without the token file.
 """
 
 import contextlib
+import functools
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
 import shutil
 import sys
 import threading
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -31,12 +32,53 @@ import rc_desk
 import rc_sessions
 import rc_settings
 import rc_share
+from rc_templates import BASE_CSP, HARDENING, page_csp
+
+# The routes that change state: POST only (GET too under RC_ALLOW_GET_ACTIONS), CSRF-checked
+_ACTIONS = frozenset({"/launch", "/stop", "/create", "/addroot", "/settings"})
+# a request carrying any of these came through a reverse proxy (tailscale serve adds them)
+_PROXIED = ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded")
 
 
 def _is_files(path: str) -> bool:
     """The /files subtree, matched the same way by every verb — '/files' itself or
     anything under it, never a '/filesomething' sibling."""
     return path == "/files" or path.startswith("/files/")
+
+
+def host_allowed(host: str) -> bool:
+    """The DNS-rebinding guard: is this Host header one of ours? IP literals always pass (a
+    rebinding page reaches us under its own hostname, never an IP), as do localhost, this
+    machine's name and RC_ALLOWED_HOSTS (a '.'-led entry matches its subdomains)."""
+    h = host.strip().lower()
+    h = h[1:].partition("]")[0] if h.startswith("[") else h
+    h = (h.partition(":")[0] if h.count(":") == 1 else h).rstrip(".")
+    with contextlib.suppress(ValueError):
+        return bool(ipaddress.ip_address(h))
+    me = cfg.HOST.lower()
+    if not h or h in cfg.ALLOWED_HOSTS or h in ("localhost", me, f"{me}.local"):
+        return bool(h)
+    return any(n[:1] == "." and h.endswith(n) for n in cfg.ALLOWED_HOSTS)
+
+
+def _cookies(header: str, name: str) -> list[str]:
+    """Every value of cookie `name`, parsed leniently: SimpleCookie drops the WHOLE header
+    on one malformed pair, so any stray cookie on the host used to 403 the launcher."""
+    pairs = (part.partition("=") for part in header.split(";"))
+    return [v.strip().strip('"') for k, eq, v in pairs if eq and k.strip() == name]
+
+
+def _host_checked(verb):
+    """Every verb runs behind the Host allowlist (DNS rebinding) — /version included."""
+
+    @functools.wraps(verb)
+    def run(self):
+        if host_allowed(host := self.headers.get("Host", "")):
+            return verb(self)
+        cfg.log_event("http", f"refused Host {host[:80]!r}", "421")  # what to allow
+        self._send(421, b"misdirected request", close=True)
+
+    return run
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -46,6 +88,8 @@ class Handler(BaseHTTPRequestHandler):
     # is what makes persistent connections framable. timeout reaps idle kept connections.
     protocol_version = "HTTP/1.1"
     timeout = 60
+    server_version, sys_version = "rc-launcher", ""  # no Python version in Server:
+    _csp: str | None = BASE_CSP  # this response's policy; end_headers resets it
 
     def _send(
         self,
@@ -54,6 +98,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype: str = "text/html; charset=utf-8",
         set_cookie: bool = False,
         close: bool = False,
+        extra: tuple = (),
     ):
         # non-2xx used to be invisible (log_message is silenced) — trace it. Path only,
         # never the query: the app's uploads carry ?token=, and a failed request would
@@ -65,11 +110,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
+        for header in extra:
+            self.send_header(*header)
+        if nonce := getattr(body, "nonce", ""):  # a rendered page: allow its own script
+            self._csp = page_csp(nonce)
         if set_cookie:
+            # Secure whenever the client's leg is HTTPS (tailscale serve says so), or forced
+            https = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
             self.send_header(
                 "Set-Cookie",
                 f"rc_token={cfg.TOKEN}; HttpOnly; SameSite=Strict; Path=/; "
-                "Max-Age=31536000",
+                f"Max-Age=31536000{'; Secure' if https or cfg.COOKIE_SECURE else ''}",
             )
         # a bail-out that never read the request body must end the connection, or that
         # unread body desyncs the next request on the socket
@@ -77,9 +128,15 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":  # a HEAD body would desync the kept-alive socket
+            self.wfile.write(body)
 
     def end_headers(self):
+        for header in HARDENING:
+            self.send_header(*header)
+        if self._csp:
+            self.send_header("Content-Security-Policy", self._csp)
+        self._csp = BASE_CSP
         # advertise the close (set by close=, _guard_body, or a client Connection: close)
         # so the client won't try to reuse a socket we're about to drop.
         if self.close_connection:
@@ -97,15 +154,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authed(self, q: dict) -> bool:
         """Token via ?token= (first contact / bookmark) or the rc_token cookie set
-        on that first load, so the token stays out of later request URLs and logs."""
+        on that first load, so the token stays out of later request URLs and logs. Compared
+        as bytes: a non-ASCII str made compare_digest raise (an unauthenticated traceback).
+        With RC_TAILSCALE_USERS set, tailscale serve's identity header must match too."""
         if not cfg.TOKEN:
             return False
-        if hmac.compare_digest(q.get("token", [""])[0], cfg.TOKEN):
-            return True
-        cookie = SimpleCookie(self.headers.get("Cookie", ""))
-        return "rc_token" in cookie and hmac.compare_digest(
-            cookie["rc_token"].value, cfg.TOKEN
-        )
+        cookie = self.headers.get("Cookie", "")
+        offered = q.get("token", [])[:1] + _cookies(cookie, "rc_token")
+        want = cfg.TOKEN.encode()  # offered values are never surrogates (latin-1, qs)
+        if not any([hmac.compare_digest(v.encode(), want) for v in offered]):
+            return False
+        login = self.headers.get("Tailscale-User-Login", "").strip().lower()
+        return not cfg.TAILSCALE_USERS or login in cfg.TAILSCALE_USERS
+
+    def _same_origin(self) -> bool:
+        """The CSRF check on every state change. A browser sends Sec-Fetch-Site (and Origin on
+        a POST/PUT/DELETE); a request with neither is a non-browser client (the Android app,
+        curl), which has no ambient cookie to abuse. SameSite=Strict alone is not enough:
+        same-SITE spans other ports on this host and other nodes of the tailnet."""
+        if (site := self.headers.get("Sec-Fetch-Site")) is not None:
+            return site in ("same-origin", "none")
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "").lower()
+        return origin is None or urlparse(origin).netloc.lower() == host
+
+    def _direct_local(self) -> bool:
+        """From this host and not through a proxy: the watchdog's own /version probe.
+        tailscale serve connects from loopback too, but always adds forwarding headers."""
+        with contextlib.suppress(ValueError):
+            if ipaddress.ip_address(self.client_address[0]).is_loopback:
+                return not any(h in self.headers for h in _PROXIED)
+        return False
 
     def _guard_body(self) -> None:
         """GET/HEAD/DELETE never read a request body; under keep-alive an unread body would
@@ -113,16 +192,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Content-Length") or self.headers.get("Transfer-Encoding"):
             self.close_connection = True
 
+    @_host_checked
     def do_GET(self):
         self._guard_body()
+        self._route()
+
+    @_host_checked
+    def do_POST(self):
+        # the actions read only the query: a small body is read (and dropped) so keep-alive
+        # stays framed; anything larger or chunked just ends the connection after
+        n = self.headers.get("Content-Length", "")
+        if n.isdigit() and int(n) <= 65536 and "Transfer-Encoding" not in self.headers:
+            self.rfile.read(int(n))
+        else:
+            self._guard_body()
+        self._route()
+
+    def _route(self):
+        """GET and POST: reads answer GET, the _ACTIONS answer POST (CSRF-checked)."""
         u = urlparse(self.path)
         q = parse_qs(u.query)
-        if u.path == "/version":  # unauthenticated: leaks only a source hash, doubles
-            return self._json(
-                {"version": cfg.VERSION}
-            )  # as the watchdog liveness probe
-        if not self._authed(q):
+        # the watchdog's liveness probe: token-free only straight from this host
+        if u.path == "/version" and (self._direct_local() or self._authed(q)):
+            return self._json({"version": cfg.VERSION})
+        action = u.path in _ACTIONS
+        if not self._authed(q) or (action and not self._same_origin()):
             return self._send(403, b"forbidden")
+        posted = self.command == "POST"
+        if action != posted and not (action and cfg.ALLOW_GET_ACTIONS):
+            allow = ("Allow", "POST" if action else "GET, HEAD")
+            return self._send(405, b"method not allowed", extra=(allow,))
         match u.path:
             case "/":
                 return self._send(200, rc_sessions.page(), set_cookie=True)
@@ -143,7 +242,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _create(self, proj: str):
         """Make the project, then launch it — one tap on the phone's "+ new" row."""
-        status, reason = rc_sessions.create(proj)
+        try:  # e.g. ENAMETOOLONG: NAME_RE has no length cap. A reason, not a dropped socket
+            status, reason = rc_sessions.create(proj)
+        except OSError as e:
+            status, reason = "failed", e.strerror or "create failed"
         cfg.log_event("create", proj, status)
         payload = {"status": status, "proj": proj}
         if reason:
@@ -173,7 +275,9 @@ class Handler(BaseHTTPRequestHandler):
         """Persist one launcher toggle (the settings switches): name=fork|worktree, on=0|1."""
         name = q.get("name", [""])[0]
         status, reason = rc_settings.set_toggle(name, q.get("on", [""])[0] == "1")
-        cfg.log_event("settings", name or "-", status)
+        cfg.log_event("settings", name or "-", f"{status} {reason or ''}".strip())
+        # a failure's OSError text names the config path: it goes to the log, not the client
+        reason = "could not save the setting" if status == "failed" else reason
         payload = {"status": status}
         if reason:
             payload["reason"] = reason
@@ -216,24 +320,27 @@ class Handler(BaseHTTPRequestHandler):
             payload["reason"] = reason
         return self._json(payload)
 
+    @_host_checked
     def do_PUT(self):
         u = urlparse(self.path)
-        if not self._authed(parse_qs(u.query)):
+        if not self._authed(parse_qs(u.query)) or not self._same_origin():
             # PUT carries a body we won't read -> close
             return self._send(403, b"forbidden", close=True)
         if _is_files(u.path):
             return self._upload(u.path)
         self._send(404, b"not found", close=True)
 
+    @_host_checked
     def do_DELETE(self):
         self._guard_body()
         u = urlparse(self.path)
-        if not self._authed(parse_qs(u.query)):
+        if not self._authed(parse_qs(u.query)) or not self._same_origin():
             return self._send(403, b"forbidden")
         if _is_files(u.path):
             return self._delete(u.path)
         self._send(404, b"not found")
 
+    @_host_checked
     def do_HEAD(self):
         """Report how many bytes of a resumable upload are already on disk, so a client
         can resume from there: X-Rc-Have = size of the target's .rcpart (0 if none)."""
@@ -375,6 +482,26 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
+    """One thread per connection, at most max_connections at once: a phone needs a handful,
+    and the cap stops a slow-drip client from growing the thread count without bound."""
+
+    max_connections = 64
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+
+    def process_request(self, request, client_address):
+        if self._slots.acquire(blocking=False):
+            return super().process_request(request, client_address)
+        self.shutdown_request(request)  # full: drop it rather than spawn another thread
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
     def handle_error(self, request, client_address):
         # a client RST / dropped connection mid-request is normal on a lossy link (Starlink):
         # keep it out of the error log (which never rotates). Only real errors get a traceback.
@@ -390,5 +517,7 @@ if __name__ == "__main__":
     print(
         f"rc-launcher on {cfg.BIND}:{cfg.PORT} parent={cfg.PARENT} spawn={rc_settings.spawn()}"
     )
+    if cfg.TAILSCALE_USERS and cfg.BIND not in ("127.0.0.1", "::1", "localhost"):
+        print("warning: RC_TAILSCALE_USERS is spoofable off loopback", flush=True)
     threading.Thread(target=rc_share.sweep_loop, daemon=True).start()
     Server((cfg.BIND, cfg.PORT), Handler).serve_forever()

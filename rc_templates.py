@@ -4,11 +4,12 @@ Splitting the pages out (rc_page, rc_files_page) left the parts that must NOT di
 the colour tokens, the base rules, the pull-to-refresh overlay, the tested upload-resume
 policy — here, spliced into each page once at import by shared(). fill() and js() do the
 per-request half: the placeholders a page still carries (__PROJECTS__, __ROWS__, ...) are
-filled with live data on the way out.
+filled with live data on the way out, plus a fresh CSP nonce for the page's one <script>.
 """
 
 import json
 import re
+import secrets
 from pathlib import Path
 from types import MappingProxyType
 
@@ -64,10 +65,48 @@ def js(x: object) -> str:
     return json.dumps(x).replace("<", "\\u003c")
 
 
+# Every response carries these; its Content-Security-Policy is BASE_CSP unless it is a page
+# (page_csp: the nonce'd script) or a share file (rc_share.serve_as: a sandbox).
+HARDENING = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+)
+BASE_CSP = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+)
+
+
+class Page(bytes):
+    """A filled page, carrying the CSP nonce minted for its <script> so the handler can send
+    the matching Content-Security-Policy on exactly this response."""
+
+    nonce = ""
+
+
+def page_csp(nonce: str) -> str:
+    """The launcher pages' policy: only the nonce'd inline script runs (an injected <script>
+    or on*= handler can't), same-origin fetches only, never framed. Inline styles stay
+    allowed: the pages use style= attributes, and CSS can't run code."""
+    return (
+        f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; "
+        "connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; "
+        "frame-ancestors 'none'"
+    )
+
+
 def fill(template: str, values: dict[str, str]) -> bytes:
     """Fill __PLACEHOLDER__s in one pass, so injected data (a project dir named __LOGIN__,
-    which NAME_RE permits) can't be re-scanned and rewritten by a later replacement."""
+    which NAME_RE permits) can't be re-scanned and rewritten by a later replacement. A
+    template's __NONCE__ slot gets a fresh CSP nonce in that same pass, so a nonce can only
+    ever land where the template put one, never inside injected data."""
+    if nonce := secrets.token_urlsafe(18) if "__NONCE__" in template else "":
+        values = values | {"__NONCE__": nonce}
     # longest key first: re alternation takes the first match, so a key that prefixes
     # another (a future __HOST__/__HOSTS__ pair) must not shadow the longer one.
     pat = re.compile("|".join(map(re.escape, sorted(values, key=len, reverse=True))))
-    return pat.sub(lambda m: values[m.group()], template).encode()
+    page = Page(pat.sub(lambda m: values[m.group()], template).encode())
+    page.nonce = nonce
+    return page

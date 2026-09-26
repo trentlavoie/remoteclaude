@@ -110,7 +110,7 @@ text-align:center}
 <div id=recentWrap class=band style=display:none><div class=sect data-sec=recent>Recent</div><ul id=recent></ul></div>
 <div id=allWrap class=band><div class=sect data-sec=all>All projects</div><ul id=list></ul></div>
 <div id=toast></div>
-<script>
+<script nonce=__NONCE__>
 const PROJECTS=__PROJECTS__, RUNNING=new Set(__RUNNING__), STARTING=new Set();
 let GITSTATES=__GITSTATES__;
 const NAME_RE=/^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -121,7 +121,8 @@ function applyCollapse(f){const c=getCollapsed();
   ['pinned','live','recent'].forEach(k=>$('#'+k+'Wrap').classList.toggle('collapsed',c.has(k)));
   // All never collapses while filtering, or a search would hide its own results
   $('#allWrap').classList.toggle('collapsed',!f&&c.has('all'));}
-const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const post=u=>fetch(u,{method:'POST'});  // every state change is a POST (CSRF-checked)
 const getRecent=()=>{try{return JSON.parse(localStorage.getItem(RK))||[]}catch(e){return[]}};
 const pushRecent=n=>{let r=getRecent().filter(x=>x!==n);r.unshift(n);
   localStorage.setItem(RK,JSON.stringify(r.slice(0,6)));};
@@ -141,9 +142,9 @@ function row(n){
   const git=g?'<span class="git'+(g.d?' dirty':'')+'" title="git branch">'+esc(g.b)+(g.d?' \\u25cf':'')+'</span>':'';
   const kind=desk?'desk':ext?'ext':'';
   li.innerHTML='<span class="dot'+(dot?' '+dot:'')+'"></span>'+
-    '<span class=nm>'+(pin?'\\u2605 ':'')+n+'</span>'+git+
+    '<span class=nm>'+(pin?'\\u2605 ':'')+esc(n)+'</span>'+git+
     '<span class="tag'+(st==='waiting'?' tagwait':desk?' tagdesk':ext?' tagext':'')+'"'+(ext?' title="remote control started outside the launcher"':desk?' title="live at the desk \\u2014 tapping takes it over"':'')+'>'+tag+'</span>'+
-    ((live||desk||ext)&&!starting?'<button class=x title="'+(kind==='desk'?'close desk session':kind==='ext'?'close external session':'close session')+'" aria-label="close '+n+'">&#10005;</button>':'');
+    ((live||desk||ext)&&!starting?'<button class=x title="'+(kind==='desk'?'close desk session':kind==='ext'?'close external session':'close session')+'" aria-label="close '+esc(n)+'">&#10005;</button>':'');
   li.onclick=()=>go(n);
   if((live||desk||ext)&&!starting)li.querySelector('.x').onclick=e=>{e.stopPropagation();stopSess(n,kind);};
   // long-press (touch or mouse) toggles the pin; togglePin sets noTap so the trailing
@@ -157,7 +158,7 @@ function row(n){
 }
 function createRow(n){
   const li=document.createElement('li');li.className='create';
-  li.innerHTML='<span class=plus>+</span><span class=nm>create &amp; start \\u201c'+n+'\\u201d</span>';
+  li.innerHTML='<span class=plus>+</span><span class=nm>create &amp; start \\u201c'+esc(n)+'\\u201d</span>';
   li.onclick=()=>createProj(n);
   return li;
 }
@@ -201,7 +202,7 @@ async function go(n){
   STARTING.add(n);render();
   try{
     const mv=$('#modelsel').value;  // "" = the pinned default (Sonnet 5)
-    const r=await fetch('/launch?json=1&proj='+encodeURIComponent(n)+(mv?'&model='+mv:''));
+    const r=await post('/launch?json=1&proj='+encodeURIComponent(n)+(mv?'&model='+encodeURIComponent(mv):''));
     const j=await r.json();
     STARTING.delete(n);
     if(j.status==='failed'){render();toast('\\u2717 '+n+': '+(j.reason||'failed to start'));return;}
@@ -221,7 +222,7 @@ async function stopSess(n,kind){
   toast('closing '+n+'\\u2026');
   try{
     const q=kind==='desk'?'&desk=1':'';  // ext folds into plain /stop; only desk is explicit
-    const r=await fetch('/stop?json=1&proj='+encodeURIComponent(n)+q);
+    const r=await post('/stop?json=1&proj='+encodeURIComponent(n)+q);
     const j=await r.json();
     if(j.status==='failed'){render();toast('\\u2717 '+n+': '+(j.reason||'still running'));return;}
     if(kind==='desk')DESK.delete(n);else if(kind==='ext')EXT.delete(n);else RUNNING.delete(n);
@@ -235,7 +236,7 @@ async function createProj(n){
   $('#q').value=n;render();
   const drop=()=>{const i=PROJECTS.indexOf(n);if(i>=0)PROJECTS.splice(i,1);};
   try{
-    const r=await fetch('/create?proj='+encodeURIComponent(n));
+    const r=await post('/create?proj='+encodeURIComponent(n));
     const j=await r.json();
     STARTING.delete(n);
     if(j.status!=='created'&&j.status!=='exists'){
@@ -261,7 +262,7 @@ function syncSettings(){$('#tgFork').checked=!!SETTINGS.fork;$('#tgWorktree').ch
 $('#settingslink').onclick=e=>{e.preventDefault();
   const p=$('#settingsPanel');p.style.display=p.style.display==='none'?'block':'none';};
 async function setToggle(name,on){
-  try{const r=await fetch('/settings?name='+name+'&on='+(on?1:0));const j=await r.json();
+  try{const r=await post('/settings?name='+name+'&on='+(on?1:0));const j=await r.json();
     if(j.status!=='set'){toast('\\u2717 '+(j.reason||j.status||'failed'));syncSettings();return;}
     SETTINGS[name]=on;toast('\\u2713 '+name+' '+(on?'on':'off'));
   }catch(e){toast('failed');syncSettings();}}
@@ -283,7 +284,7 @@ $('#newbtn').onclick=()=>{
   createProj(n);};
 $('#addroot').onclick=async function(e){e.preventDefault();
   var p=(prompt('Add a project root (absolute path):')||'').trim();if(!p)return;toast('adding\\u2026');
-  try{var r=await fetch('/addroot?path='+encodeURIComponent(p));var j=await r.json();
+  try{var r=await post('/addroot?path='+encodeURIComponent(p));var j=await r.json();
     if(j.status!=='added'&&j.status!=='exists'){toast('\\u2717 '+(j.reason||j.status||'add failed'));return;}
     toast(j.status==='exists'?'already a root':'\\u2713 added, reloading\\u2026');setTimeout(function(){location.reload();},500);
   }catch(err){toast('add failed');}};

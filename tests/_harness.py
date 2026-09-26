@@ -48,6 +48,13 @@ _ATTRS = {
         "GIT_TTL",
         "DESK_TTL",
         "log_event",
+        "SHARE_ENABLED",
+        "ALLOWED_HOSTS",
+        "TAILSCALE_USERS",
+        "ALLOW_GET_ACTIONS",
+        "COOKIE_SECURE",
+        "UPLOAD_MAX",
+        "SHARE_MIN_FREE",
     ),
     rc_sessions: ("STATE_DIR",),
     rc_settings: ("RESUME", "SPAWN", "MODEL", "SETTINGS_FILE"),
@@ -168,7 +175,12 @@ def serve(tc):
 class ServerCase(unittest.TestCase):
     """The real Handler over a loopback server, with a tmp SHARE and a known token — the
     same contract a browser/app client speaks. Subclasses extend setUp with whatever extra
-    globals their routes read."""
+    globals their routes read.
+
+    The share is switched ON here (it is opt-in in production) and the disk-free floor off,
+    so the /files tests don't depend on this machine's free space. ALLOW_GET_ACTIONS is ON
+    only because tests/test_settings.py still drives /settings by GET; the web-tier tests
+    (test_routes, test_web_*) turn it back off and speak POST, as the page does."""
 
     def setUp(self):
         restore_globals(self)
@@ -177,6 +189,9 @@ class ServerCase(unittest.TestCase):
         rc_settings.SETTINGS_FILE = Path(self.share, "settings.json")
         rc_config.TOKEN = TOKEN
         rc_config.log_event = lambda *a: None  # keep test traffic out of the real log
+        rc_config.SHARE_ENABLED = True
+        rc_config.SHARE_MIN_FREE = 0
+        rc_config.ALLOW_GET_ACTIONS = True
         self.port = serve(self)
 
     def req(self, method, path, body=None, headers=None, cookie=True):

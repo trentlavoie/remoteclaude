@@ -296,7 +296,7 @@ class UploadTest(ServerCase):
         pattern = bytes(range(256)) * 300
         s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
         s.sendall(
-            f"PUT /files/drop.bin HTTP/1.1\r\nHost: x\r\nCookie: rc_token={TOKEN}\r\n"
+            f"PUT /files/drop.bin HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: rc_token={TOKEN}\r\n"
             f"X-Rc-Offset: 0\r\nX-Rc-Total: 200000\r\nContent-Length: 200000\r\n\r\n".encode()
         )
         s.sendall(pattern)  # more than one 64KB read, well short of total
