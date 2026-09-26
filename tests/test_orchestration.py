@@ -81,7 +81,8 @@ class OrchestrationTest(MockedToolsCase):
     def test_resolve_model_aliases_ids_and_unknown(self):
         # a short alias resolves to the full ID; a full ID passes through; empty -> the pin;
         # anything else is None so the route can reject it rather than pass free text to argv
-        self.assertEqual(rc_settings.resolve_model("opus"), "claude-opus-5")
+        self.assertEqual(rc_settings.resolve_model("opus"), "claude-opus-5-5")
+        self.assertEqual(rc_settings.resolve_model("opus-5"), "claude-opus-5")
         self.assertEqual(rc_settings.resolve_model("claude-opus-5"), "claude-opus-5")
         self.assertEqual(rc_settings.resolve_model(""), rc_settings.MODEL)
         self.assertIsNone(rc_settings.resolve_model("gpt-9"))

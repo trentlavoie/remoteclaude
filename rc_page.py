@@ -200,7 +200,7 @@ function authBar(){
   const a=$('#auth'),b=$('#authbar');
   if(LOGIN==='ok'){a.className='auth ok';a.textContent='\\u25cf login ok';b.classList.remove('show');}
   else if(LOGIN==='loggedout'){a.className='auth bad';a.textContent='\\u2717 logged out';
-    b.textContent='Claude is logged out on the Mac \\u2014 new sessions will fail. Run claude /login there.';b.classList.add('show');}
+    b.textContent='Claude is logged out on the host \\u2014 new sessions will fail. Run claude /login there.';b.classList.add('show');}
   else{a.className='auth warn';a.textContent='\\u2026 login ?';b.classList.remove('show');}
 }
 async function go(n){

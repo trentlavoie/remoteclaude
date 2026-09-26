@@ -23,10 +23,7 @@ select = ["F", "E9"]  # real errors only (pyflakes + syntax) — the gate's floo
 
 [tool.bandit]
 exclude_dirs = ["tests", "review"]
-# One deliberate, documented choice; everything else Medium+ must stay clean:
-#   B104 — upstream's launcher defaults to binding 0.0.0.0 (LAN / subnet-route reach). This
-#          fork deploys it on 127.0.0.1 behind `tailscale serve`; drop this skip once
-#          rc_config's code default is 127.0.0.1 too, so a new all-interfaces bind fails CI.
-# B310 is not skipped: the one urlopen (the RC_NOTIFY_URL push) carries an inline
-# `# nosec B310` after its http(s) scheme allowlist, so any other urlopen still fails CI.
-skips = ["B104"]
+# No skips: every Medium+ finding fails CI. The launcher binds 127.0.0.1 by default, so a
+# new all-interfaces bind (B104) is caught. B310: the one urlopen (the RC_NOTIFY_URL push)
+# carries an inline `# nosec B310` after its http(s) scheme allowlist, so any other urlopen
+# still fails CI.

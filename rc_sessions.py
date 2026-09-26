@@ -186,7 +186,7 @@ def death_reason(sess: str) -> str:
     if "trust" in low:
         return "untrusted dir"
     if any(w in low for w in ("auth", "logged out", "log in", "login", "credential")):
-        return "login expired — run `claude /login` on the Mac"
+        return "login expired — run `claude /login` on the host"
     return last[:80] or "exited immediately"
 
 
@@ -247,6 +247,10 @@ def _spawn(sess: str, proj: str, cmd: list[str], env_opts: list[str]) -> str:
     rc_tmux.tmux("set-option", "-t", pane, "remain-on-exit", "on")
     time.sleep(3)
     dead = rc_tmux.tmux("list-panes", "-t", pane, "-F", "#{pane_dead}").stdout.strip()
+    if not dead:
+        # no pane at all, not a dead one (remain-on-exit keeps those): tmux exited 0
+        # without a session, e.g. the rc-tmux shim's socket dir is gone with its service
+        return "tmux session did not start (is rc-tmux.service running?)"
     if dead != "0":
         reason = death_reason(sess)
         rc_tmux.tmux("kill-session", "-t", rc_tmux.target(sess))

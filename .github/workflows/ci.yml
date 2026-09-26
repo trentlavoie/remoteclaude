@@ -25,7 +25,7 @@ jobs:
         run: ruff format --check .
       - name: Typecheck (shipped modules; whole-tree is noisy with test scaffolding)
         run: ty check rc_*.py
-      - name: Security scan (Medium+; B104 skipped in pyproject, B310 nosec'd inline)
+      - name: Security scan (Medium+; no skips, B310 nosec'd inline)
         run: bandit -c pyproject.toml -q -r . --severity-level medium
       - name: Tests + coverage floor (aggregate and per-file)
         run: |

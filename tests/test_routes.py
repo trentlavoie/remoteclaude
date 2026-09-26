@@ -360,7 +360,7 @@ class RouteTest(ServerCase):
         status, body = self.post("/launch?proj=p&model=opus&json=1")
         self.assertEqual(json.loads(body)["status"], "launched")
         newsession = next(c for c in calls if "new-session" in " ".join(map(str, c)))
-        self.assertIn("--model claude-opus-5 --remote-control", newsession[-1])
+        self.assertIn("--model claude-opus-5-5 --remote-control", newsession[-1])
 
     def test_launch_route_unknown_model_fails_with_allowed_list(self):
         # a bad ?model= is rejected before any spawn; the reason names the allowed aliases
