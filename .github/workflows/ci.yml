@@ -5,12 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+# least privilege for the job token: CI only reads the repo
+permissions:
+  contents: read
+
 jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # pinned to commits (tags can be moved); bump deliberately
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
       - run: pip install ruff tzdata coverage bandit ty
@@ -20,7 +25,7 @@ jobs:
         run: ruff format --check .
       - name: Typecheck (shipped modules; whole-tree is noisy with test scaffolding)
         run: ty check rc_*.py
-      - name: Security scan (Medium+; deliberate B104/B310 skipped in pyproject)
+      - name: Security scan (Medium+; B104 skipped in pyproject, B310 nosec'd inline)
         run: bandit -c pyproject.toml -q -r . --severity-level medium
       - name: Tests + coverage floor (aggregate and per-file)
         run: |
@@ -28,6 +33,12 @@ jobs:
           coverage report --fail-under=90
           coverage json -q -o coverage.json
           python review/coverage_floor.py 90
+      - name: Shell scripts (syntax + shellcheck; rc_guard.sh is bash/zsh dual, not checked)
+        # the systemd units themselves are verified by tests/test_deploy_install.py
+        # (install.sh --render + systemd-analyze --user verify)
+        run: |
+          for f in install.sh uninstall.sh deploy/*.sh deploy/rc-tmux; do bash -n "$f"; done
+          shellcheck -x install.sh uninstall.sh deploy/*.sh deploy/rc-tmux
       - name: JS upload-policy tests
         # quoted glob: node expands it itself; bare directory args were dropped in newer node
         run: node --test 'tests/js/*.test.cjs'
