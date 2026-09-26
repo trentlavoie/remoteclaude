@@ -27,6 +27,8 @@ def live() -> list[dict]:
 
 
 def shares_tree(here: Path, cwd: str) -> bool:
+    if not cwd:  # Path("") is ".", which would match wherever the prompt stands
+        return False
     p = Path(cwd).resolve()
     return here == p or p in here.parents or here in p.parents
 
