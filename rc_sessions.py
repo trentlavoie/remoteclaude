@@ -12,11 +12,9 @@ order they must happen in.
 
 import contextlib
 import html
-import json
 import os
 import re
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from types import MappingProxyType
@@ -26,7 +24,7 @@ import rc_desk
 import rc_git
 import rc_settings
 import rc_tmux
-from rc_claude import CLAUDE, auth_status
+from rc_claude import CLAUDE, auth_status, trust_dir
 from rc_page import PAGE
 from rc_state import RANK, STATE_DIR, valid_states
 from rc_templates import fill, js
@@ -108,37 +106,11 @@ def ensure_trusted(proj: str) -> None:
     """Pre-accept the workspace trust dialog for the project dir. `claude remote-control`
     refuses to start in an untrusted dir, exiting 1 before it registers with the relay — so
     the app never sees the session and the phone tap silently does nothing, and no trust
-    dialog is reachable from the phone. Atomic replace, and only when the flag is missing, to
-    avoid racing claude's own frequent writes to this file."""
-    key = cfg.project_dir(proj)
-    try:
-        d = json.loads(Path(cfg.CLAUDE_JSON).read_text())
-    except FileNotFoundError:
-        return  # no ~/.claude.json yet — nothing to pre-trust
-    except (OSError, json.JSONDecodeError) as e:
-        # unreadable/corrupt: surface it, don't 500 the launch
-        cfg.log_event("trust", proj, f"skip: {e}")
-        return
-    entry = d.setdefault("projects", {}).setdefault(key, {})
-    if entry.get("hasTrustDialogAccepted"):
-        return
-    entry.setdefault("allowedTools", [])
-    entry.setdefault("mcpServers", {})
-    entry["hasTrustDialogAccepted"] = True
-    # a UNIQUE temp in the same dir: two concurrent first-time-trust launches through a
-    # shared temp name could tear ~/.claude.json (and 500 the loser on a vanished temp).
-    fd, tmp = tempfile.mkstemp(
-        dir=os.path.dirname(cfg.CLAUDE_JSON), prefix=".claude.json.rc"
-    )
-    # disk full / unwritable: log and continue, don't 500 the launch or orphan a temp
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(d, f, indent=2)
-        os.replace(tmp, cfg.CLAUDE_JSON)
-    except OSError as e:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        cfg.log_event("trust", proj, f"skip write: {e}")
+    dialog is reachable from the phone. The careful write (atomic, fsync'd, 0600, re-merged
+    if a live claude wrote the file meanwhile) is rc_claude.trust_dir; a skip is logged,
+    never raised, so it can't 500 the launch."""
+    if why := trust_dir(cfg.CLAUDE_JSON, cfg.project_dir(proj)):
+        cfg.log_event("trust", proj, why)
 
 
 def rc_name(proj: str) -> str:

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import sys
 import subprocess
+import rc_claude
 import rc_config
 import rc_desk
 import rc_git
@@ -429,9 +430,9 @@ class FunctionTest(unittest.TestCase):
         def _boom(*a, **k):
             raise OSError("No space left on device")
 
-        real_dump = rc_sessions.json.dump
-        rc_sessions.json.dump = _boom
-        self.addCleanup(setattr, rc_sessions.json, "dump", real_dump)
+        real_dump = rc_claude.json.dump
+        rc_claude.json.dump = _boom
+        self.addCleanup(setattr, rc_claude.json, "dump", real_dump)
         rc_sessions.ensure_trusted("p")  # must not raise
         self.assertEqual(Path(rc_config.CLAUDE_JSON).read_text(), "{}")  # untouched
         self.assertEqual(
