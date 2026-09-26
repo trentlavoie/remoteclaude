@@ -14,6 +14,7 @@ import contextlib
 import html
 import os
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -169,7 +170,7 @@ def has_desk_thread(proj: str) -> bool:
 
 def death_reason(sess: str) -> str:
     """Why a just-launched RC session died, read from its dead pane."""
-    out = rc_tmux.tmux("capture-pane", "-t", f"={sess}", "-p").stdout
+    out = rc_tmux.tmux("capture-pane", "-t", rc_tmux.pane(sess), "-p").stdout
     last = next(
         (
             s
@@ -204,10 +205,12 @@ def _settle_prompt(sess: str, proj: str) -> str:
     9h/833k-token thread). Returns '' when there is no prompt or it was answered;
     a death reason for an UNKNOWN confirm-style prompt (fail loudly, never
     phantom-succeed)."""
-    pane = rc_tmux.tmux("capture-pane", "-t", f"={sess}", "-p").stdout
+    pane = rc_tmux.tmux("capture-pane", "-t", rc_tmux.pane(sess), "-p").stdout
     for sentinel, (keys, note) in _PROMPT_ANSWERS.items():
         if sentinel in pane:
-            rc_tmux.tmux("send-keys", "-t", f"={sess}", *keys)
+            # fixed key NAMES from the policy table, never pane text: nothing read back
+            # from the session is ever typed into it
+            rc_tmux.tmux("send-keys", "-t", rc_tmux.pane(sess), *keys)
             cfg.log_event("launch", proj, note)
             return ""
     if "Enter to confirm" in pane:
@@ -221,36 +224,34 @@ def _spawn(sess: str, proj: str, cmd: list[str], env_opts: list[str]) -> str:
     after the startup window, else the death reason (and kills the session). RC
     dies within ~2s on any startup error — untrusted dir, expired login, or
     nothing to --continue — taking its tmux session with it; remain-on-exit
-    holds the dead pane so death_reason can read WHY."""
+    holds the dead pane so death_reason can read WHY. tmux hands its one command string
+    to `sh -c`, so it is shlex.join'd — every word quoted, never re-parsed as syntax (a
+    plain word is left bare, so the line reads as before) — after a `--`."""
+    root = cfg.project_dir(proj)
     # raw subprocess.run so new-session stderr hits the log; nonzero = name taken, bail
-    if subprocess.run(
-        [
-            rc_tmux.TMUX,
-            "new-session",
-            "-d",
-            "-s",
-            sess,
-            *env_opts,
-            "-c",
-            cfg.project_dir(proj),
-            " ".join(cmd),
-        ],
-        check=False,
-    ).returncode:
+    try:
+        rc = subprocess.run(
+            rc_tmux.argv("new-session", "-d", "-s", sess, *env_opts, "-c", root)
+            + ["--", shlex.join(cmd)],
+            env=rc_tmux.client_env(),
+            timeout=rc_tmux.TIMEOUT,
+        ).returncode
+    except subprocess.TimeoutExpired:
+        return "tmux new-session timed out"
+    if rc:
         return "tmux new-session failed"
-    rc_tmux.tmux("set-option", "-t", f"={sess}", "remain-on-exit", "on")
+    pane = rc_tmux.pane(sess)
+    rc_tmux.tmux("set-option", "-t", pane, "remain-on-exit", "on")
     time.sleep(3)
-    dead = rc_tmux.tmux(
-        "list-panes", "-t", f"={sess}", "-F", "#{pane_dead}"
-    ).stdout.strip()
+    dead = rc_tmux.tmux("list-panes", "-t", pane, "-F", "#{pane_dead}").stdout.strip()
     if dead != "0":
         reason = death_reason(sess)
-        rc_tmux.tmux("kill-session", "-t", f"={sess}")
+        rc_tmux.tmux("kill-session", "-t", rc_tmux.target(sess))
         return reason
     if reason := _settle_prompt(sess, proj):
-        rc_tmux.tmux("kill-session", "-t", f"={sess}")
+        rc_tmux.tmux("kill-session", "-t", rc_tmux.target(sess))
         return reason
-    rc_tmux.tmux("set-option", "-t", f"={sess}", "remain-on-exit", "off")
+    rc_tmux.tmux("set-option", "-t", pane, "remain-on-exit", "off")
     return ""
 
 

@@ -254,7 +254,7 @@ class MenuTest(GuardHarness):
         self.has_session_rcs = [0, 0, 1]
         self.assertEqual(self._choose("t"), rc_guard.PROCEED)
         cmds = self._cmds()
-        self.assertIn("tmux send-keys -t =rc-alpha C-c", cmds)
+        self.assertIn("tmux send-keys -t =rc-alpha: C-c", cmds)
         self.assertNotIn("tmux kill-session -t =rc-alpha", cmds)
 
     def test_takeover_kills_when_sigint_is_ignored_and_pins_the_target(self):
@@ -264,7 +264,7 @@ class MenuTest(GuardHarness):
         rc_guard.TAKEOVER_WAIT = 0
         self.assertEqual(self._choose("t"), rc_guard.PROCEED)
         cmds = self._cmds()
-        sigint = cmds.index("tmux send-keys -t =rc-alpha C-c")
+        sigint = cmds.index("tmux send-keys -t =rc-alpha: C-c")
         kill = cmds.index("tmux kill-session -t =rc-alpha")
         self.assertLess(sigint, kill)  # SIGINT (relay deregister) before the kill
 

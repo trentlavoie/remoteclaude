@@ -98,7 +98,8 @@ def live_sess(cwd: str, parent: str) -> str | None:
     inside, root = hit
     proj = inside[len(root) :].split(os.sep, 1)[0]
     sess = rc_tmux.session_name(proj)
-    with contextlib.suppress(FileNotFoundError):
+    # no tmux, or a wedged server (timeout): no provable session — never block the launch
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         return sess if rc_tmux.has_session(sess) else None
     return None
 
@@ -131,9 +132,14 @@ def state_tag() -> str:
 def attach(sess: str) -> None:
     # Inside an existing tmux client, attach refuses ("sessions should be nested with
     # care"); switch-client is the in-tmux equivalent. Not rc_tmux.tmux(): that captures
-    # output, and an attach has to own the terminal.
-    verb = "switch-client" if os.environ.get("TMUX") else "attach"
-    subprocess.run([rc_tmux.TMUX, verb, "-t", f"={sess}"])
+    # output, and an attach has to own the terminal. switch-client can't cross servers,
+    # though: inside the user's own tmux while the launcher runs its own (RC_TMUX_SOCKET),
+    # nest an attach instead, with $TMUX dropped so tmux allows it.
+    inside, env = os.environ.get("TMUX"), None
+    if inside and not rc_tmux.same_server(inside):
+        inside, env = None, {k: v for k, v in os.environ.items() if k != "TMUX"}
+    verb = "switch-client" if inside else "attach"
+    subprocess.run(rc_tmux.argv(verb, "-t", rc_tmux.target(sess)), env=env)
 
 
 def takeover(sess: str) -> int:
