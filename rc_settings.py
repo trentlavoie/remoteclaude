@@ -31,6 +31,25 @@ MODEL_ALIASES = {
 }
 MODELS = frozenset(MODEL_ALIASES.values())
 
+# Opt-in permission-mode pin for every launched session (RC_PERMISSION_MODE). Unset = pass no
+# flag, so a session follows settings.json exactly as a desk claude does (upstream behavior).
+# bypassPermissions is deliberately NOT accepted: a phone-driven session with no approvals is
+# never something an env typo or copy-paste should produce. Any other unrecognized value
+# fails CLOSED to "default" (ask for everything) rather than to settings.json's default.
+PERMISSION_MODES = frozenset({"default", "acceptEdits", "plan", "auto", "dontAsk"})
+
+
+def _permission_mode(raw: str) -> str:
+    return raw if not raw or raw in PERMISSION_MODES else "default"
+
+
+PERMISSION_MODE = _permission_mode(os.environ.get("RC_PERMISSION_MODE", ""))
+
+
+def permission_args() -> list[str]:
+    """`--permission-mode <m>` for the launch argv when a mode is pinned, else nothing."""
+    return ["--permission-mode", PERMISSION_MODE] if PERMISSION_MODE else []
+
 
 def resolve_model(value: str) -> str | None:
     """A /launch?model= value -> a full allowlisted model ID, or None if unrecognized.
@@ -87,6 +106,8 @@ def set_toggle(name: str, on: bool) -> tuple[str, str | None]:
             )
             with os.fdopen(fd, "w") as f:
                 json.dump(_settings() | {name: on}, f)
+                f.flush()
+                os.fsync(f.fileno())  # durable before the rename makes it the settings
             os.replace(tmp, SETTINGS_FILE)
     except OSError as e:
         if tmp:

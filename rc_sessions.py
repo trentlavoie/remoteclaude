@@ -127,11 +127,13 @@ def fresh_cmd(proj: str, model: str | None = None) -> list[str]:
     neither the desk nor the launcher's own --continue can ever reopen (proven 2026-08-16).
     worktree/session keep the subcommand form — the flag form takes no --spawn, and those
     modes are isolated by design, so desk resumability isn't their point. --model pins the
-    session's model (global flag, so it precedes the remote-control subcommand); default pin."""
-    mflag = ["--model", model or rc_settings.MODEL]
+    session's model (global flag, so it precedes the remote-control subcommand); default pin.
+    An opt-in RC_PERMISSION_MODE pin rides on every form (a subcommand option there)."""
+    mflag, perm = ["--model", model or rc_settings.MODEL], rc_settings.permission_args()
     if (sp := rc_settings.spawn()) == "same-dir":
-        return [CLAUDE, *mflag, "--remote-control", rc_name(proj)]
-    return [CLAUDE, *mflag, "remote-control", "--name", rc_name(proj), "--spawn", sp]
+        return [CLAUDE, *mflag, *perm, "--remote-control", rc_name(proj)]
+    name = rc_name(proj)
+    return [CLAUDE, *mflag, "remote-control", "--name", name, "--spawn", sp, *perm]
 
 
 def launch_cmd(proj: str, model: str | None = None) -> tuple[list[str], bool]:
@@ -145,7 +147,8 @@ def launch_cmd(proj: str, model: str | None = None) -> tuple[list[str], bool]:
         "continue",
         "fork",
     ) and rc_settings.spawn() == "same-dir":
-        cmd = [CLAUDE, "--model", model or rc_settings.MODEL, "--continue"]
+        cmd = [CLAUDE, "--model", model or rc_settings.MODEL]
+        cmd += [*rc_settings.permission_args(), "--continue"]
         if res == "fork":
             cmd.append("--fork-session")
         return [*cmd, "--remote-control", rc_name(proj)], True
@@ -357,17 +360,24 @@ def desk_stop(proj: str) -> tuple[str, str | None]:
     return _pid_stop(proj, rc_desk.takeover, "stopdesk", rc_desk.desk_projects)
 
 
+# one dir entry + one tmux session name; over-long is "badname", not an OSError 500
+MAX_NAME = 64
+
+
 def create(proj: str) -> tuple[str, str | None]:
     """Make a new project dir under PARENT, git-init it, drop a CLAUDE.md stub.
 
-    NAME_RE keeps proj a single path segment, so it can't escape PARENT. git
-    runs best-effort: if it's missing the dir and CLAUDE.md still stand and the
-    session launches anyway. The route launches it after this returns 'created'.
+    fullmatch, not match: NAME_RE's `$` also matches before a trailing newline, so
+    "name%0A" made a dir whose name ends in a newline. So validated, proj is one ASCII
+    segment (no '/', '..', leading '.'/'-'/'_'): it can't escape PARENT or read as an
+    option. git runs best-effort and bounded: missing or hung, the dir and CLAUDE.md still
+    stand and the session launches anyway. The route launches it after 'created'.
     """
-    if not cfg.NAME_RE.match(proj):
+    if len(proj) > MAX_NAME or not cfg.NAME_RE.fullmatch(proj):
         return (
             "badname",
-            "start with a letter or digit, then letters/digits/dash/underscore",
+            "start with a letter or digit, then letters/digits/dash/underscore"
+            f" (at most {MAX_NAME})",
         )
     # a category dir, not a project: /create bypasses the membership guard, so this would
     # otherwise spawn an rc-<group> session projects() never lists and /stop can't reach
@@ -382,6 +392,13 @@ def create(proj: str) -> tuple[str, str | None]:
         os.makedirs(path)
     except FileExistsError:  # an existing project, or a second tap racing the first
         return "exists", None
-    subprocess.run([cfg.GIT, "init", "-q"], cwd=path, capture_output=True)
-    Path(path, "CLAUDE.md").write_text(f"# {proj}\n")
+    except OSError as e:  # PARENT unwritable / missing mount: report, don't 500
+        return "failed", str(e)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            [cfg.GIT, "init", "-q"], cwd=path, capture_output=True, timeout=30
+        )
+    # "x": create-only, never written through a name that appeared under us
+    with contextlib.suppress(OSError), open(Path(path, "CLAUDE.md"), "x") as f:
+        f.write(f"# {proj}\n")
     return "created", None

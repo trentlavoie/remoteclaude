@@ -182,7 +182,10 @@ class SnapshotBranchTest(MockedToolsCase):
         self.responses = {"stash create": proc(stdout="abc123\n")}
         env(self, RC_SNAPSHOT="1")
         rc_git.snapshot("proj")
-        modes = {c[4]: text for c, text in seen if c[0] == rc_config.GIT}
+        # the subcommand follows `-C <path>` (the -c safety pins sit before it)
+        modes = {
+            c[c.index("-C") + 2]: text for c, text in seen if c[0] == rc_config.GIT
+        }
         self.assertEqual(modes.get("rev-parse"), False)
         self.assertEqual(modes.get("update-ref"), False)
         self.assertEqual(modes.get("stash"), True)
