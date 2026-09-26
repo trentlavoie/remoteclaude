@@ -33,13 +33,16 @@ class LiveTmuxTest(unittest.TestCase):
         keep(self, (rc_tmux, "SOCKET"), (rc_tmux, "TMUX"))
         rc_tmux.TMUX = shutil.which("tmux") or "tmux"
         rc_tmux.SOCKET = f"rc-test-{secrets.token_hex(4)}"
+        # start the throwaway server config-free; every rc_tmux call then joins it
+        self._new("seed", "cat")
+        sock = rc_tmux.tmux("display-message", "-p", "#{socket_path}").stdout.strip()
+        # LIFO: kill the server, then remove the socket file tmux leaves behind
+        self.addCleanup(lambda: sock and os.path.exists(sock) and os.unlink(sock))
         self.addCleanup(
             subprocess.run,
             [rc_tmux.TMUX, "-L", rc_tmux.SOCKET, "kill-server"],
             capture_output=True,
         )
-        # start the throwaway server config-free; every rc_tmux call then joins it
-        self._new("seed", "cat")
 
     def _new(self, sess, *cmd, window="w"):
         subprocess.run(
