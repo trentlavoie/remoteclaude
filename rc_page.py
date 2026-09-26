@@ -123,6 +123,8 @@ text-align:center}
 const PROJECTS=__PROJECTS__, RUNNING=new Set(__RUNNING__), STARTING=new Set();
 let GITSTATES=__GITSTATES__;
 const NAME_RE=/^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+// a typed name with spaces becomes a dashed project name ("test session" -> test-session)
+const slug=s=>s.trim().replace(/\s+/g,'-');
 let LOGIN=__LOGIN__, STATES=__STATES__, DESK=new Set(__DESK__), EXT=new Set(__EXT__), SETTINGS=__SETTINGS__, noTap=0;
 const $=s=>document.querySelector(s), RK='rc_recent', PK='rc_pinned', CK='rc_collapsed';
 const getCollapsed=()=>{try{return new Set(JSON.parse(localStorage.getItem(CK))||[])}catch(e){return new Set()}};
@@ -176,8 +178,8 @@ function render(){
   const hits=PROJECTS.filter(n=>n.toLowerCase().includes(f));
   const list=$('#list');list.innerHTML='';
   hits.forEach(n=>list.appendChild(row(n)));
-  const canCreate=raw&&NAME_RE.test(raw)&&!PROJECTS.includes(raw);
-  if(canCreate)list.appendChild(createRow(raw));
+  const nm=slug(raw), canCreate=nm&&NAME_RE.test(nm)&&!PROJECTS.includes(nm);
+  if(canCreate)list.appendChild(createRow(nm));
   if(!hits.length&&!canCreate)list.innerHTML='<div class=empty>no match</div>';
   $('#count').textContent=hits.length+' / '+PROJECTS.length;
   band('#pinnedWrap','#pinned',getPinned().filter(n=>PROJECTS.includes(n)),f);
@@ -283,10 +285,10 @@ let tt;function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('sh
 $('#q').addEventListener('input',render);
 $('#q').addEventListener('keydown',e=>{if(e.key!=='Enter')return;
   const first=$('#list li[data-n]');if(first){go(first.dataset.n);return;}
-  const raw=$('#q').value.trim();
-  if(raw&&NAME_RE.test(raw)&&!PROJECTS.includes(raw))createProj(raw);});
+  const nm=slug($('#q').value);
+  if(nm&&NAME_RE.test(nm)&&!PROJECTS.includes(nm))createProj(nm);});
 $('#newbtn').onclick=()=>{
-  const n=(prompt('New project name',$('#q').value.trim())||'').trim();
+  const n=slug(prompt('New project name',$('#q').value.trim())||'');
   if(!n)return;
   if(!NAME_RE.test(n)){toast('\\u2717 bad name: start with a letter or digit');return;}
   if(PROJECTS.includes(n)){toast(n+' already exists \\u2014 tap it to start');return;}
