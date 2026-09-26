@@ -59,8 +59,10 @@ else
 	sudo install -m 0644 "$tmp/key.gpg" "$KEYRING"
 	sudo install -m 0644 "$tmp/ts.list" "$SOURCES"
 	echo "==> installing tailscale"
-	sudo apt-get update -qq
-	sudo apt-get install -y tailscale
+	# noninteractive + needrestart list-only: no TUI prompts without a terminal, and no
+	# surprise restarts of Docker/Caddy/other services mid-install.
+	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get update -qq
+	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y tailscale
 fi
 
 sudo systemctl enable --now tailscaled
