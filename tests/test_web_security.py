@@ -119,6 +119,23 @@ class AuthTest(WebCase):
         hdr = {who: "trent@example.com"}
         self.assertEqual(self.req("GET", "/status", cookie=False, headers=hdr)[0], 403)
 
+    def test_refused_tailscale_login_is_logged_without_the_token(self):
+        rc_config.TAILSCALE_USERS = frozenset({"trent@example.com"})
+        seen = []
+        rc_config.log_event = lambda *a: seen.append(a)
+        self.req(
+            "GET",
+            f"/status?token={TOKEN}",
+            headers={"Tailscale-User-Login": "eve@x.io"},
+        )
+        self.assertIn(("http", "refused Tailscale login 'eve@x.io'", "403"), seen)
+        self.assertNotIn(TOKEN, repr(seen))
+        seen.clear()
+        self.req(
+            "GET", "/status", cookie=False
+        )  # a bad token is not an identity refusal
+        self.assertFalse([a for a in seen if "Tailscale" in a[1]])
+
     def test_tailscale_header_is_ignored_when_no_allowlist(self):
         hdr = {"Tailscale-User-Login": "anyone@x.io"}
         self.assertEqual(self.req("GET", "/status", headers=hdr)[0], 200)

@@ -164,7 +164,11 @@ class Handler(BaseHTTPRequestHandler):
         if not any([hmac.compare_digest(v.encode(), want) for v in offered]):
             return False
         login = self.headers.get("Tailscale-User-Login", "").strip().lower()
-        return not cfg.TAILSCALE_USERS or login in cfg.TAILSCALE_USERS
+        if not cfg.TAILSCALE_USERS or login in cfg.TAILSCALE_USERS:
+            return True
+        # token was right, identity wasn't: log who (never the token) so it can be allowed
+        cfg.log_event("http", f"refused Tailscale login {login[:80]!r}", "403")
+        return False
 
     def _same_origin(self) -> bool:
         """The CSRF check on every state change. A browser sends Sec-Fetch-Site (and Origin on
