@@ -23,7 +23,10 @@ select = ["F", "E9"]  # real errors only (pyflakes + syntax) — the gate's floo
 
 [tool.bandit]
 exclude_dirs = ["tests", "review"]
-# Two deliberate, documented choices; everything else Medium+ must stay clean:
-#   B104 — the launcher binds 0.0.0.0 on purpose (reached over the Tailscale subnet route / LAN)
-#   B310 — the only urlopen is the user-configured RC_NOTIFY_URL ntfy/webhook push
-skips = ["B104", "B310"]
+# One deliberate, documented choice; everything else Medium+ must stay clean:
+#   B104 — upstream's launcher defaults to binding 0.0.0.0 (LAN / subnet-route reach). This
+#          fork deploys it on 127.0.0.1 behind `tailscale serve`; drop this skip once
+#          rc_config's code default is 127.0.0.1 too, so a new all-interfaces bind fails CI.
+# B310 is not skipped: the one urlopen (the RC_NOTIFY_URL push) carries an inline
+# `# nosec B310` after its http(s) scheme allowlist, so any other urlopen still fails CI.
+skips = ["B104"]
