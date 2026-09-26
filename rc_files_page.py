@@ -49,16 +49,17 @@ li.empty{background:none;color:var(--mut);text-align:center;padding:30px}
 <div class=sortbar><span class=sortlbl>sort</span><button class=sortbtn data-k=n>name</button><button class=sortbtn data-k=s>size</button><button class=sortbtn data-k=t>date</button></div>
 </header>
 <ul>__ROWS__</ul>
-<script>
+<script nonce=__NONCE__>
 var REL=__REL__,up=document.getElementById('up'),st=document.getElementById('st');
 // The Android wrapper tags its UA; there the WebView's DownloadManager saves the file and
 // the app calls rcDownloadDone() when it finishes. Elsewhere the page fetches the bytes
 // itself so it can show progress and confirm, then hands them to a download link.
 var IS_APP=/rc-launcher-app/.test(navigator.userAgent),BUSY=false;
-// The server serves files inline, so in a browser a tap on something the browser renders
-// (a PDF, an image, text, video) opens it as it always did; only files a browser would
-// save anyway take the fetch-and-confirm path. In the app every tap is a download.
-var VIEWABLE=/\\.(pdf|txt|md|log|csv|json|html?|png|jpe?g|gif|webp|svg|mp4|m4a|mp3|webm)$/i;
+// The server serves passive types inline, so in a browser a tap on something the browser
+// renders (a PDF, an image, text, video) opens it as it always did; everything else (HTML and
+// SVG included — the server forces those to attachment) takes the fetch-and-confirm path. In
+// the app every tap is a download.
+var VIEWABLE=/\\.(pdf|txt|md|log|csv|json|png|jpe?g|gif|webp|mp4|m4a|mp3|webm)$/i;
 __DOWNLOAD__
 function status(m){st.hidden=!m;st.textContent=m||'';}
 function statusLater(m){status(m);setTimeout(function(){status('');},4000);}
@@ -140,6 +141,7 @@ b.addEventListener('click',function(){var s=getSort();
 if(s.k===b.dataset.k)s.d=-s.d;else{s.k=b.dataset.k;s.d=b.dataset.k==='n'?1:-1;}
 localStorage.setItem('rc_sort',JSON.stringify(s));applySort();});});
 applySort();
+if(location.search)history.replaceState({},'',location.pathname);  // drop a ?token=
 __PTR__
 </script>
 </body></html>""")

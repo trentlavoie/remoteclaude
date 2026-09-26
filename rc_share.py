@@ -10,7 +10,9 @@ rc_launcher; this module never sees a request.
 import contextlib
 import hashlib
 import html
+import mimetypes
 import os
+import shutil
 import stat
 import time
 from datetime import datetime
@@ -54,6 +56,11 @@ def part_paths(rel: str, rid: str = "") -> tuple[str | None, str]:
     target = share_target(rel)
     if target is None or target == cfg.SHARE or os.path.isdir(target):
         return None, ""
+    name = os.path.basename(
+        target
+    )  # a temp's own suffix, or a control char, never lands
+    if name.endswith(".rcpart") or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return None, ""
     # sha1 tags the temp by X-Rc-Id — a filename key, not a security digest, so
     # usedforsecurity=False (unchanged output, and it works on FIPS-restricted hosts).
     digest = hashlib.sha1(rid.encode(), usedforsecurity=False).hexdigest()[:12]
@@ -61,15 +68,57 @@ def part_paths(rel: str, rid: str = "") -> tuple[str | None, str]:
 
 
 def have(tmp: str) -> int:
-    """Bytes already on disk for a resumable upload's temp (0 if none)."""
-    return os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+    """Bytes already on disk for a resumable upload's temp (0 if none). lstat, and regular
+    files only: a .rcpart planted as a symlink is never measured, resumed or finalized."""
+    try:
+        st = os.lstat(tmp)
+    except OSError:
+        return 0
+    return st.st_size if stat.S_ISREG(st.st_mode) else 0
+
+
+def upload_refusal(total: int, held: int) -> tuple[int, str] | None:
+    """(status, reason) when an upload of `total` bytes (`held` already on disk) must be
+    refused before its body is read: over the per-file cap, or it would leave the share's
+    disk under the free-space floor. None when it may proceed."""
+    if total > cfg.UPLOAD_MAX:
+        return 413, "too large"
+    if shutil.disk_usage(cfg.SHARE).free - (total - held) < cfg.SHARE_MIN_FREE:
+        return 507, "insufficient storage"
+    return None
+
+
+# Sandbox for anything served from the share: no script, no plugins, a unique origin.
+FILE_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+
+
+def serve_as(path: str) -> tuple[str, str, str | None]:
+    """(Content-Type, Content-Disposition, CSP) for a download. The launcher origin carries
+    the auth cookie, so an uploaded .html/.svg rendered inline would be stored XSS with full
+    launcher access: only passive media and plain text open inline; everything else is a
+    sandboxed octet-stream attachment."""
+    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    name = f"filename*=UTF-8''{quote(os.path.basename(path))}"
+    if ctype == "application/pdf" or (
+        ctype.startswith(("image/", "audio/", "video/")) and "svg" not in ctype
+    ):
+        return ctype, f"inline; {name}", None
+    if ctype in ("text/plain", "text/csv", "text/markdown", "application/json"):
+        return ctype, f"inline; {name}", FILE_CSP
+    return "application/octet-stream", f"attachment; {name}", FILE_CSP
+
+
+def _norm(rel: str) -> str:
+    """rel (still percent-encoded, as the request carried it) with each segment decoded
+    and requoted once — the one href shape the crumb, the rows and the upload URL share."""
+    return "".join("/" + quote(unquote(seg)) for seg in rel.split("/") if seg)
 
 
 def share_page(target: str, rel: str) -> bytes:
     return fill(
         FILES_PAGE,
         {
-            "__REL__": js(rel.rstrip("/")),
+            "__REL__": js(_norm(rel)),
             "__HOST__": html.escape(cfg.HOST),
             "__CRUMB__": crumb_html(rel),
             "__ROWS__": rows_html(target, rel),
@@ -99,7 +148,7 @@ def rows_html(target: str, rel: str) -> str:
         names = sorted(os.listdir(target))
     except OSError:
         return "<li class=empty>unreadable</li>"  # a permission failure is not "empty"
-    base = rel.rstrip("/")
+    base = _norm(rel)  # requoted, so a raw '"' in the request path can't leave the href
     dirs, files = [], []
     for name in names:
         if name.endswith(".rcpart"):  # in-progress/partial upload — hide it

@@ -65,7 +65,9 @@ ROOTS_FILE = Path(
 PORT = int(
     os.environ.get("RC_LAUNCHER_PORT") or "8787"
 )  # empty env must not ValueError
-BIND = os.environ.get("RC_LAUNCHER_BIND", "0.0.0.0")
+# loopback by default: front it with `tailscale serve` (HTTPS). The LAN / subnet-route setup
+# opts back in with RC_LAUNCHER_BIND=0.0.0.0.
+BIND = os.environ.get("RC_LAUNCHER_BIND", "127.0.0.1")
 HOST = socket.gethostname().split(".")[0]
 CLAUDE_JSON = os.path.expanduser("~/.claude.json")
 # per-project transcripts
@@ -107,8 +109,44 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")  # must start alphanumeric:
 # _archive shouldn't list as projects; a leading - is a shell/tmux arg-injection shape)
 
 
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _names(name: str) -> frozenset[str]:
+    return frozenset(
+        s.strip().lower() for s in os.environ.get(name, "").split(",") if s.strip()
+    )
+
+
+def _mib(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    return (int(raw) if raw.isdigit() else default) << 20
+
+
+# --- web-tier hardening; rc_launcher reads these as cfg.NAME at request time ---
+# /files is OPT-IN: unless RC_SHARE_ENABLED=1 its routes 404 and the page hides the link.
+SHARE_ENABLED = _flag("RC_SHARE_ENABLED")
+# Host names accepted besides localhost, IP literals and this host's own name (the DNS-
+# rebinding guard): add the `tailscale serve` name. A leading '.' entry allows subdomains.
+ALLOWED_HOSTS = _names("RC_ALLOWED_HOSTS")
+# Tailscale-User-Login values allowed IN ADDITION to the token. Only meaningful bound to
+# loopback behind `tailscale serve`, which sets the header and drops a client's own copy.
+TAILSCALE_USERS = _names("RC_TAILSCALE_USERS")
+# Legacy opt-in: let /launch /stop /create /addroot /settings answer GET as well as POST.
+ALLOW_GET_ACTIONS = _flag("RC_ALLOW_GET_ACTIONS")
+COOKIE_SECURE = _flag("RC_COOKIE_SECURE")  # else Secure iff X-Forwarded-Proto: https
+UPLOAD_MAX = _mib("RC_UPLOAD_MAX_MB", 4096)  # per-file cap on a /files upload
+SHARE_MIN_FREE = _mib("RC_SHARE_MIN_FREE_MB", 1024)  # an upload never leaves less free
+
+
+# C0 controls + DEL -> '?': a request-supplied name must not forge a second log line
+_CTRL = dict.fromkeys([*range(32), 127], "?")
+
+
 def log_event(action: str, proj: str, result: str) -> None:
     """One audit line per launch/stop to StandardOutPath (/tmp/rc-launcher.log)."""
+    action, proj, result = (str(x).translate(_CTRL) for x in (action, proj, result))
     print(
         f"{datetime.now(MT):%Y-%m-%d %H:%M:%S} MT  {action:<6} {proj} -> {result}",
         flush=True,
@@ -239,11 +277,12 @@ def add_root(raw: str) -> tuple[str, str | None]:
         except OSError as e:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            return "failed", str(e)
+            # strerror, not str(e): the client must not see the config path
+            return "failed", e.strerror or "write failed"
     except (
         OSError
     ) as e:  # mkstemp makes 0600 and os.replace preserves it — no chmod needed
-        return "failed", str(e)
+        return "failed", e.strerror or "write failed"
     return "added", None
 
 

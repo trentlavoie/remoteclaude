@@ -107,7 +107,7 @@ class FilesAuthTest(ServerCase):
         # would desync the next request — the server must close instead of reusing the socket.
         s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
         s.sendall(
-            f"GET /files?token={TOKEN} HTTP/1.1\r\nHost: x\r\n"
+            f"GET /files?token={TOKEN} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
             f"Content-Length: 5\r\n\r\nHELLO".encode()
         )
         resp = s.recv(65536).decode("latin1")
@@ -120,7 +120,7 @@ class FilesAuthTest(ServerCase):
         # a chunked (no Content-Length) body on GET must also close, or it desyncs keep-alive
         s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
         s.sendall(
-            f"GET /files?token={TOKEN} HTTP/1.1\r\nHost: x\r\n"
+            f"GET /files?token={TOKEN} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
             f"Transfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n".encode()
         )
         resp = s.recv(65536).decode("latin1")
@@ -132,7 +132,7 @@ class FilesAuthTest(ServerCase):
         # and close rather than leave an unread body to desync the next request
         s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
         s.sendall(
-            f"PUT /files/nolen.bin HTTP/1.1\r\nHost: x\r\nCookie: rc_token={TOKEN}\r\n"
+            f"PUT /files/nolen.bin HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: rc_token={TOKEN}\r\n"
             f"X-Rc-Offset: 0\r\nX-Rc-Total: 10\r\n\r\n".encode()
         )
         chunks = []  # read to EOF: the server closes, and the body can trail the headers
