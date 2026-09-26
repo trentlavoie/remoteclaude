@@ -35,8 +35,11 @@ fi
 [ "${ID:-}" = ubuntu ] || die "this script supports Ubuntu only (found: ${ID:-unknown})"
 codename=${VERSION_CODENAME:?no VERSION_CODENAME in /etc/os-release}
 
-echo "==> sudo check (you may be asked for your password)"
-sudo -v
+if ! sudo -n true 2>/dev/null; then
+	echo "==> sudo check (you may be asked for your password)"
+	# Not unconditional: -v prompts unless *every* matching sudoers rule is NOPASSWD.
+	sudo -v
+fi
 
 if command -v tailscale >/dev/null; then
 	echo "==> tailscale already installed: $(tailscale version | head -1)"
