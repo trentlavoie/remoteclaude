@@ -1,0 +1,32 @@
+# Template: install.sh fills in the repo and python paths and writes the result to
+# ~/.config/systemd/user/. Edit this file (then re-run install.sh), not the copy.
+#
+# One watchdog run (login, free disk, launcher liveness), fired by rc-healthcheck.timer.
+# Alerts go to the journal (`journalctl --user -u rc-healthcheck -p warning`) and, when
+# RC_NOTIFY_URL is set in the env file, to your phone. A run that finds a problem exits
+# non-zero, so it also shows in `systemctl --user --failed`.
+
+[Unit]
+Description=Remote Control launcher health watchdog (login, disk, liveness)
+Documentation=file://@REPO@/RUNBOOK.md
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/rc-launcher/rc-launcher.env
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+WorkingDirectory=@REPO@
+ExecStart=@PYTHON@ -E -s -u @REPO@/rc_healthcheck.py
+TimeoutStartSec=2min
+UMask=0077
+MemoryMax=1G
+TasksMax=128
+# same seccomp/prctl-only hardening as rc-launcher.service (see the notes there)
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM

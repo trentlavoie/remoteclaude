@@ -1,0 +1,25 @@
+#!/bin/sh
+# tmux, pinned to the dedicated server that rc-tmux.service owns (Linux / systemd --user).
+#
+# The systemd units point RC_TMUX_BIN here, so every tmux call the launcher makes (and the
+# server rc-tmux.service starts) goes to ONE exact socket:
+#
+#   $XDG_RUNTIME_DIR/rc-tmux/tmux.sock      (i.e. /run/user/<uid>/rc-tmux/tmux.sock)
+#
+# Why -S (an exact path) and not TMUX_TMPDIR or -L <name>: tmux silently falls back to
+# /tmp/tmux-<uid>/ when TMUX_TMPDIR does not exist, which is where your personal tmux
+# server lives. -S has no fallback. The socket's directory is rc-tmux.service's
+# RuntimeDirectory, created when that unit starts and removed when it stops, so while the
+# unit is down a `new-session` from the launcher FAILS instead of quietly starting a tmux
+# server inside the launcher's own cgroup (where a launcher restart would kill every
+# Claude session).
+#
+# By hand, from an SSH shell on the host:
+#   ~/workspace/remoteclaude/deploy/rc-tmux ls
+#   ~/workspace/remoteclaude/deploy/rc-tmux attach -t rc-<project>
+# (or alias rctmux to it). Your own `tmux` keeps using your personal server, untouched.
+#
+# The path is a function of XDG_RUNTIME_DIR alone (systemd gives every --user unit the same
+# one), with no override knob, so the launcher and rc-tmux.service cannot disagree on it.
+set -eu
+exec tmux -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rc-tmux/tmux.sock" "$@"

@@ -1,0 +1,46 @@
+# Template: install.sh fills in the repo and python paths and writes the result to
+# ~/.config/systemd/user/. Edit this file (then re-run install.sh), not the copy.
+#
+# The tmux server that holds every phone-launched Claude session, in a unit of its own.
+# A process belongs to the cgroup of the unit that forked it, so if the launcher's first
+# `tmux new-session` started the server, the server and every Claude under it would live
+# in rc-launcher.service: `systemctl --user restart rc-launcher` (install.sh --reload)
+# would kill them all, and any sandboxing on the launcher would cripple them. Here, the
+# launcher is only ever a tmux *client* (deploy/rc-tmux, an exact -S socket in this unit's
+# RuntimeDirectory), so it can be restarted and hardened freely.
+#
+# Stopping THIS unit ends every session, on purpose: systemd SIGTERMs each claude, which
+# flushes its transcript and deregisters from the relay (the thread stays resumable).
+# install.sh starts it but never restarts it.
+
+[Unit]
+Description=Remote Control launcher: tmux server holding the phone-launched Claude sessions
+Documentation=file://@REPO@/RUNBOOK.md
+
+[Service]
+Type=simple
+# claude, node, uv/uvx and anything a session runs by name live in ~/.local/bin
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+# /run/user/<uid>/rc-tmux (0700): exists exactly while this unit runs
+RuntimeDirectory=rc-tmux
+RuntimeDirectoryMode=0700
+WorkingDirectory=%h
+# -D: stay in the foreground (systemd supervises it) and keep running with zero sessions.
+# -f: its own tiny config, never ~/.tmux.conf.
+ExecStart=@REPO@/deploy/rc-tmux -D -f @REPO@/deploy/rc-tmux.conf
+Restart=always
+RestartSec=2
+RestartSteps=5
+RestartMaxDelaySec=1min
+KillMode=control-group
+TimeoutStopSec=30
+# The one restriction that costs a Claude session nothing: no privilege gain through setuid
+# binaries (sudo, su, pkexec) from a phone-driven session. It could not answer a sudo
+# password prompt anyway. Deliberately NOT here: ProtectHome/ProtectSystem/PrivateTmp (a
+# session needs your whole home and /tmp, and on Ubuntu 24.04 they would need unprivileged
+# user namespaces, which AppArmor blocks), MemoryDenyWriteExecute (claude/node JIT),
+# RestrictNamespaces (Claude Code's own sandbox uses them), resource caps.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -8,7 +8,96 @@ Tailscale.
 > **Host:** this runbook is written for the macOS (launchd) host. `install.sh`
 > also targets Linux via `systemd --user`; the daily-use, security, and design
 > sections apply to both. Only the launchd, `pmset`, and auto-login specifics are
-> macOS-only.
+> macOS-only. **This fork deploys on a Linux server behind Tailscale:** read
+> [Linux + Tailscale host](#linux--tailscale-host-this-fork) first; where it and the
+> macOS text below disagree, it wins.
+
+## Linux + Tailscale host (this fork)
+
+A headless Ubuntu 24.04 server with a public IP, systemd --user, reached only over the
+tailnet. Network setup, tailnet policy and firewall: [docs/TAILSCALE.md](docs/TAILSCALE.md).
+
+| Topic | macOS text below | This fork |
+|---|---|---|
+| Reach | `http://<mac-lan-ip>:8787` over a router subnet route | `https://<host>.<tailnet>.ts.net/` via `tailscale serve`; the launcher is bound to `127.0.0.1` |
+| Services | two LaunchAgents | `rc-tmux.service` (holds the sessions), `rc-launcher.service` (web), `rc-healthcheck.timer` |
+| Settings | plist env, set via `RC_X=... ./install.sh` | `~/.config/rc-launcher/rc-launcher.env` (0600; `RC_X=... ./install.sh` still writes it) |
+| Logs | `/tmp/rc-launcher.log`, `/tmp/rc-healthcheck.log` | `journalctl --user -u rc-launcher` / `-u rc-healthcheck` / `-u rc-tmux` |
+| Watch a session | `tmux attach -t rc-<proj>` | `deploy/rc-tmux attach -t rc-<proj>` (plain `tmux` is your personal server) |
+| Survive logout/reboot | `pmset` + auto-login | lingering: `loginctl show-user $USER -p Linger` must say `yes` (else `sudo loginctl enable-linger $USER`) |
+| Login storage | GUI keychain (`security unlock-keychain` over SSH) | `~/.claude/.credentials.json`; no keychain step |
+| Alerts | desktop + optional ntfy | journal (`-p warning`) + `RC_NOTIFY_URL` (ntfy): the only push a headless box has |
+| Turn-state hook | registered by `install.sh` | opt-in: `./install.sh --hook` (backup + atomic replace; `uninstall.sh` removes it) |
+| File share | always on | off unless `RC_SHARE_ENABLED=1` |
+
+### Deploy, in order
+
+| # | Step | Who |
+|---|---|---|
+| 1 | `./install.sh` (settings via the env file or `RC_X=... ./install.sh`; see `deploy/rc-launcher.env.example`) | you, no sudo |
+| 2 | `bash deploy/install-tailscale.sh` from an SSH shell | you, **sudo** |
+| 3 | Admin console: MagicDNS, HTTPS Certificates, disable key expiry for the server, tailnet policy | you, browser |
+| 4 | `deploy/tailscale-serve.sh` | no sudo |
+| 5 | Put the `RC_ALLOWED_HOSTS` / `RC_TAILSCALE_USERS` lines it prints in the env file, `./install.sh --reload` | no sudo |
+| 6 | Phone: Tailscale app on, open `https://<host>.<tailnet>.ts.net/?token=<token>` once, Add to Home Screen | you |
+
+`./install.sh --render DIR` writes the units and env file it would install into `DIR` and
+stops, so you can read exactly what will run (`systemd-analyze --user verify DIR/*.service`).
+
+### Why two units, and what restarts what
+
+A process belongs to the cgroup of the unit that started it. If the launcher's first
+`tmux new-session` started the tmux server, every Claude session would live inside
+`rc-launcher.service`: a restart would kill them all (the default `KillMode=control-group`),
+and any sandboxing of the launcher would apply to them. `KillMode=process` would only hide
+that (orphans left in a dead unit's cgroup). So the server has a unit of its own:
+
+- `rc-tmux.service` runs `tmux -D` on the exact socket `$XDG_RUNTIME_DIR/rc-tmux/tmux.sock`
+  (its RuntimeDirectory), with its own config. `deploy/rc-tmux` is the only client and is
+  what `RC_TMUX_BIN` points at. `-S` has no fallback: `TMUX_TMPDIR` / `-L` silently fall
+  back to `/tmp/tmux-$UID/`, your personal server. While the unit is down its directory is
+  gone, so a launch fails ("tmux new-session failed") instead of starting a server inside
+  the launcher.
+- `./install.sh --reload` (= `systemctl --user restart rc-launcher`) is always safe:
+  sessions keep running. Re-running `./install.sh` restarts the launcher, never rc-tmux.
+- `systemctl --user restart rc-tmux` (or stop) ends every session: systemd SIGTERMs each
+  claude, which flushes its transcript and deregisters from the relay, so each thread stays
+  resumable. Stopping it also stops the launcher (`Requires=`).
+
+Hardening: the launcher and watchdog units get `NoNewPrivileges`, `RestrictNamespaces`,
+`RestrictAddressFamilies`, `RestrictSUIDSGID`, `LockPersonality`, a syscall deny list,
+`UMask=0077` and memory/task caps. Not `ProtectSystem`/`ProtectHome`/`PrivateTmp`: in a
+user unit they need unprivileged user namespaces, which Ubuntu 24.04's AppArmor denies
+(the unit would not start), and the launcher must write `$HOME` anyway (`~/.claude.json`).
+Not `MemoryDenyWriteExecute`: the launcher runs `claude auth status`, a JIT runtime.
+`rc-tmux.service` gets only `NoNewPrivileges` (no sudo/su/pkexec from a phone session),
+because the sessions need your full environment.
+
+### Verify (Linux)
+
+1. `systemctl --user status rc-tmux rc-launcher rc-healthcheck.timer`: all active.
+2. `curl -s localhost:8787/version`: the build stamp (after `--reload`, a new one).
+3. `deploy/tailscale-serve.sh --status`: your URL proxies to `http://127.0.0.1:8787`.
+4. From the phone, tap a project; `deploy/rc-tmux ls` shows `rc-<project>`, and the Claude
+   app shows it with a green dot.
+5. `systemctl --user start rc-healthcheck; journalctl --user -u rc-healthcheck -n 3`:
+   `login=ok build=<stamp>`. Alerts: `journalctl --user -u rc-healthcheck -p warning`.
+
+### Remote re-login (Linux)
+
+Same as below minus the keychain: SSH in (over the tailnet or the public SSH port),
+`~/.local/bin/claude auth login`, open the printed URL on the phone, sign in, paste the code
+back. `~/.local/bin/claude auth status` shows `loggedIn: true` when done.
+
+### Desk side on this host
+
+A `claude` you start over SSH inside a project counts as a desk session: `/launch` answers
+"already (desk)" instead of starting a second one. The desk guard (`rc_guard.sh`) only sees
+the phone sessions if it uses the same tmux client: `export
+RC_TMUX_BIN=~/workspace/remoteclaude/deploy/rc-tmux` in the shell that sources it.
+`RC_SPAWN=worktree` (this fork's setting) launches fresh in a worktree; resume/takeover do
+not apply to it, and upstream lists that spawn mode as unverified on current Claude Code
+builds, so check the first launch.
 
 ## How it works
 
@@ -410,6 +499,12 @@ login, and it's the same lever the stale-ghost note suggests, so skip it remotel
   needs per-client registry edits, caps transfers at 50 MB by default, and sends the
   password in clear text. `tailscale serve` was rejected for the same reason the Mac runs
   no Tailscale: it needs `tailscaled` on the Mac.
+- **(This fork) The Linux server does run Tailscale, and only `tailscale serve`** — a
+  public-IP server has no router subnet route to hide behind, so the launcher binds
+  loopback and `tailscale serve` is the one door: tailnet-only, HTTPS, identity headers.
+  Never Funnel (`deploy/tailscale-serve.sh` refuses it). The sessions' tmux server is its
+  own unit (`rc-tmux.service`) so the launcher can restart and be sandboxed; do not fold it
+  back into `rc-launcher.service` or switch to `KillMode=process`.
 
 ## Eval notes (grounded against the real machine)
 

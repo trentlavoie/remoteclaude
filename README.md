@@ -3,6 +3,37 @@
 [![CI](https://github.com/uofm-matt/remoteclaude/actions/workflows/ci.yml/badge.svg)](https://github.com/uofm-matt/remoteclaude/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+## Fork notes (trentlavoie)
+
+This fork runs the launcher on a **headless Linux server with a public IP** (Ubuntu 24.04,
+systemd --user), reached only over **Tailscale** from a phone/iPad. Everything below the
+fork notes is upstream's description and still applies, except where these notes differ.
+
+- **Nothing public.** The launcher binds `127.0.0.1:8787` (pinned in the systemd unit); the
+  only way in is `tailscale serve` with HTTPS on your tailnet
+  ([`deploy/tailscale-serve.sh`](deploy/tailscale-serve.sh), which never uses Funnel).
+  Setup, tailnet policy, firewall and the why: [docs/TAILSCALE.md](docs/TAILSCALE.md).
+- **Sessions survive launcher restarts.** The tmux server that holds every Claude session
+  runs in its own unit, `rc-tmux.service`, on a dedicated socket
+  ([`deploy/rc-tmux`](deploy/rc-tmux)), never your personal tmux server. So
+  `./install.sh --reload` is always safe, and the launcher unit can be sandboxed
+  ([`deploy/systemd/`](deploy/systemd/)) without touching the sessions.
+- **Config in a 0600 env file**, `~/.config/rc-launcher/rc-launcher.env`
+  ([every key](deploy/rc-launcher.env.example)); the token keeps its own 0600 file.
+- **Layered guards** (web tier): a Host allowlist (`RC_ALLOWED_HOSTS`), a Tailscale identity
+  allowlist (`RC_TAILSCALE_USERS`), and the `/files` share off unless `RC_SHARE_ENABLED=1`.
+  The token is still the gate, and it grants code execution as your user.
+- **install.sh never runs sudo** and only edits `~/.claude/settings.json` when you ask
+  (`./install.sh --hook`: backed up, replaced atomically, removed by `uninstall.sh`).
+- **Alerts** go to the journal and, with `RC_NOTIFY_URL`, to your phone (ntfy); a headless
+  box has no desktop notifications. `rc-healthcheck.timer` runs every 30 min.
+
+Deploy, in order: `./install.sh` → `bash deploy/install-tailscale.sh` (sudo, from SSH) →
+admin console (MagicDNS, HTTPS, policy) → `deploy/tailscale-serve.sh` → set the two
+allowlists it prints → `./install.sh --reload`. Details in [RUNBOOK.md](RUNBOOK.md#linux--tailscale-host-this-fork).
+
+---
+
 Start a Claude Code Remote Control session on your computer from your phone, in
 any of your project directories, with that project's full context. No SSH, no VS
 Code left running, no Tailscale on the host. Runs on macOS or Linux.
@@ -94,7 +125,7 @@ so the launcher only handles switching between projects.
 | `rc_status.py` / `rc_prompt.zsh` | Reader + opt-in zsh prompt tag showing when a remote turn is live in your current repo. |
 | `rc_guard.py` / `rc_guard.sh` | Opt-in desk-side launch guard (logic in Python, one shim for bash and zsh): wraps your `claude` so it offers attach / takeover / fresh instead of launching blind into a live phone session's thread. |
 | `rc_healthcheck.py` | Watchdog, every 30 min: the `claude auth status` login, free disk space (alerts under 5 GiB), and a `/version` GET for launcher liveness; notifies (desktop + optional ntfy) on any. |
-| `install.sh` / `uninstall.sh` | Service setup and teardown; generates the token outside the repo, registers the state hook. |
+| `install.sh` / `uninstall.sh` | Service setup and teardown; generates the token outside the repo; registers the state hook only on `--hook`. |
 | `RUNBOOK.md` | Full setup, daily use, login recovery, and design notes. |
 
 ## Install
@@ -105,12 +136,12 @@ cd remoteclaude
 ./install.sh
 ```
 
-It installs `tmux` if missing, generates a token (stored at
-`~/.config/rc-launcher/token`, never in the repo), registers the state hook,
-loads the service (launchd on macOS, systemd --user on Linux), and prints your
+It installs `tmux` if missing (macOS; on Linux it tells you the command), generates a
+token (stored at `~/.config/rc-launcher/token`, never in the repo), loads the service (launchd on macOS, systemd --user on Linux), and prints your
 phone URL plus the remaining host-specific steps. See [RUNBOOK.md](RUNBOOK.md)
 for the complete walkthrough, including the network setup and how to recover if
-the login lapses while you're away.
+the login lapses while you're away. The working/waiting dots need the turn-state hook in
+`~/.claude/settings.json`: `./install.sh --hook` registers it (backup first).
 
 ## Security
 

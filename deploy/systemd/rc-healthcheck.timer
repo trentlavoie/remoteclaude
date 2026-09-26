@@ -1,0 +1,15 @@
+# Template: install.sh writes this to ~/.config/systemd/user/ unchanged.
+
+[Unit]
+Description=Run the Remote Control launcher watchdog every 30 min
+
+[Timer]
+# 2 min after the timer starts (boot, via lingering, or install), then every 30 min.
+# OnActiveSec rather than OnBootSec: a timer enabled long after boot still gets a first run,
+# and OnUnitActiveSec only counts from a previous run.
+OnActiveSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
