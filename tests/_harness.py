@@ -178,9 +178,7 @@ class ServerCase(unittest.TestCase):
     globals their routes read.
 
     The share is switched ON here (it is opt-in in production) and the disk-free floor off,
-    so the /files tests don't depend on this machine's free space. ALLOW_GET_ACTIONS is ON
-    only because tests/test_settings.py still drives /settings by GET; the web-tier tests
-    (test_routes, test_web_*) turn it back off and speak POST, as the page does."""
+    so the /files tests don't depend on this machine's free space."""
 
     def setUp(self):
         restore_globals(self)
@@ -191,7 +189,6 @@ class ServerCase(unittest.TestCase):
         rc_config.log_event = lambda *a: None  # keep test traffic out of the real log
         rc_config.SHARE_ENABLED = True
         rc_config.SHARE_MIN_FREE = 0
-        rc_config.ALLOW_GET_ACTIONS = True
         self.port = serve(self)
 
     def req(self, method, path, body=None, headers=None, cookie=True):

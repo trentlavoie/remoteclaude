@@ -104,7 +104,7 @@ GIT_STATUS_TIMEOUT = float(os.environ.get("RC_GIT_STATUS_TIMEOUT", "3"))
 DESK_TTL = float(os.environ.get("RC_DESK_TTL", "10"))
 LOGIN_TTL = 60.0  # `claude auth status` spawns a process; the phone polls every 5s
 
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")  # must start alphanumeric: no dot
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*\Z")  # must start alphanumeric: no dot
 # (rc-<name>.pane is an untargetable tmux session), no leading _ or - (meta/scratch dirs like
 # _archive shouldn't list as projects; a leading - is a shell/tmux arg-injection shape)
 

@@ -97,9 +97,14 @@ class SettingsTest(unittest.TestCase):
         )
 
 
+SAME = {"Sec-Fetch-Site": "same-origin"}  # what the page's fetch() sends
+
+
 class SettingsRouteTest(ServerCase):
     def test_settings_route_persists_and_shows_in_status(self):
-        st, _, body = self.req("GET", f"/settings?name=fork&on=1&token={TOKEN}")
+        st, _, body = self.req(
+            "POST", f"/settings?name=fork&on=1&token={TOKEN}", headers=SAME
+        )
         self.assertEqual(st, 200)
         self.assertEqual(json.loads(body)["status"], "set")
         # the live status the page polls now reports fork on
@@ -107,14 +112,16 @@ class SettingsRouteTest(ServerCase):
         self.assertTrue(json.loads(s)["settings"]["fork"])
 
     def test_settings_route_rejects_unknown_name(self):
-        _, _, body = self.req("GET", f"/settings?name=bogus&on=1&token={TOKEN}")
+        _, _, body = self.req(
+            "POST", f"/settings?name=bogus&on=1&token={TOKEN}", headers=SAME
+        )
         self.assertEqual(json.loads(body)["status"], "badname")
 
     def test_worktree_on_reports_fork_off_even_when_fork_set(self):
         # both toggles independent, but a worktree launch never resumes, so fork can't apply.
         # status must not advertise fork active while worktree is on — or the UI lies.
-        self.req("GET", f"/settings?name=fork&on=1&token={TOKEN}")
-        self.req("GET", f"/settings?name=worktree&on=1&token={TOKEN}")
+        self.req("POST", f"/settings?name=fork&on=1&token={TOKEN}", headers=SAME)
+        self.req("POST", f"/settings?name=worktree&on=1&token={TOKEN}", headers=SAME)
         _, _, s = self.req("GET", f"/status?token={TOKEN}")
         st = json.loads(s)["settings"]
         self.assertEqual(st, {"fork": False, "worktree": True})

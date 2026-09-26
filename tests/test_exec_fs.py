@@ -174,3 +174,10 @@ class PermissionModeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NameReTest(unittest.TestCase):
+    def test_trailing_newline_is_not_a_valid_name(self):
+        # `$` matches before a final newline; `\Z` doesn't. listings/project_dir use .match
+        self.assertIsNone(rc_config.NAME_RE.match("proj\n"))
+        self.assertIsNotNone(rc_config.NAME_RE.match("proj"))
